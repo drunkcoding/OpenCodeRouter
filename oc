@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PORT_START=30000
+PORT_END=31000
+
+if [ $# -lt 1 ]; then
+  echo "Usage: oc <path> [path ...]" >&2
+  exit 1
+fi
+
+is_serving() {
+  local target="$1"
+  for pid in $(pgrep -f "opencode serve" 2>/dev/null); do
+    local cwd
+    cwd="$(readlink -f /proc/"$pid"/cwd 2>/dev/null)" || continue
+    [ "$cwd" = "$target" ] && return 0
+  done
+  return 1
+}
+
+port_in_use() {
+  ss -tlnH "sport = :$1" 2>/dev/null | grep -q . && return 0
+  return 1
+}
+
+next_port=$PORT_START
+
+for dir in "$@"; do
+  abs="$(realpath "$dir" 2>/dev/null || echo "$dir")"
+
+  if [ ! -d "$abs" ]; then
+    echo "[skip] '$abs' is not a directory" >&2
+    continue
+  fi
+
+  if is_serving "$abs"; then
+    echo "[skip] already serving: $abs"
+    continue
+  fi
+
+  # Find next available port in range
+  while port_in_use "$next_port"; do
+    next_port=$((next_port + 1))
+    if [ "$next_port" -gt "$PORT_END" ]; then
+      echo "[error] no free ports in $PORT_START-$PORT_END" >&2
+      exit 1
+    fi
+  done
+
+  echo "[start] opencode serve in $abs (port $next_port)"
+  (cd "$abs" && opencode serve --port "$next_port" &)
+  next_port=$((next_port + 1))
+done
+
+wait

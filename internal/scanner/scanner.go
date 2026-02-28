@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -135,14 +136,12 @@ func (s *Scanner) probePort(ctx context.Context, port int) {
 		return
 	}
 
-	projectName := project.Name
 	projectPath := project.Path
-	if projectName == "" {
-		projectName = project.ID
-	}
 	if projectPath == "" {
-		projectPath = "/unknown/" + projectName
+		projectPath = "/unknown/" + project.ID
 	}
+	// Use the last folder name as the display name so it matches the slug.
+	projectName := filepath.Base(projectPath)
 
 	s.registry.Upsert(port, projectName, projectPath, health.Version)
 }

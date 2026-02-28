@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"regexp"
@@ -56,25 +57,25 @@ func (r *Registry) Upsert(port int, projectName, projectPath, version string) bo
 		r.logger.Info("backend project changed", "port", port, "old_slug", oldSlug, "new_slug", slug)
 	}
 
-	existing, isUpdate := r.backends[slug]
-	if isUpdate {
-		// If a different port now serves this slug, remove the old port mapping.
-		if existing.Port != port {
-			delete(r.byPort, existing.Port)
+	// Update existing backend if we already have this slug from the same port,
+	// or from a different port that moved.
+	if existing, ok := r.backends[slug]; ok {
+		if existing.ProjectPath == projectPath || existing.Port == port {
+			// Same project or same port — update in place.
+			if existing.Port != port {
+				delete(r.byPort, existing.Port)
+			}
+			existing.Port = port
+			existing.ProjectName = projectName
+			existing.ProjectPath = projectPath
+			existing.Version = version
+			existing.LastSeen = time.Now()
+			r.byPort[port] = slug
+			return false
 		}
-		existing.Port = port
-		existing.ProjectName = projectName
-		existing.ProjectPath = projectPath
-		existing.Version = version
-		existing.LastSeen = time.Now()
-		r.byPort[port] = slug
-		return false
-	}
-
-	// Handle slug collision: two different projects produce the same slug.
-	// Disambiguate by appending the port.
-	if _, collision := r.backends[slug]; collision {
-		slug = slug + "-" + strings.TrimLeft(string(rune(port)), "0")
+		// Slug collision: different project produces the same slug.
+		// Disambiguate by appending the port number.
+		slug = fmt.Sprintf("%s-%d", slug, port)
 	}
 
 	r.backends[slug] = &Backend{
@@ -132,6 +133,29 @@ func (r *Registry) LookupByPort(port int) (*Backend, bool) {
 	b := r.backends[slug]
 	copy := *b
 	return &copy, true
+}
+
+// LookupByPath finds a backend whose ProjectPath matches the given path.
+// Falls back to slug-based lookup using Slugify(path).
+func (r *Registry) LookupByPath(projectPath string) (*Backend, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	// Exact path match first.
+	for _, b := range r.backends {
+		if b.ProjectPath == projectPath {
+			copy := *b
+			return &copy, true
+		}
+	}
+
+	// Fall back to slug-based lookup.
+	slug := Slugify(projectPath)
+	if b, ok := r.backends[slug]; ok {
+		copy := *b
+		return &copy, true
+	}
+	return nil, false
 }
 
 // All returns a snapshot of all backends.

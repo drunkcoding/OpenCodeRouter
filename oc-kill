@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+pids="$(pgrep -f 'opencode serve' 2>/dev/null)" || true
+
+if [ -z "$pids" ]; then
+  echo "No opencode serve processes running."
+  exit 0
+fi
+
+count=0
+for pid in $pids; do
+  cwd="$(readlink -f /proc/"$pid"/cwd 2>/dev/null)" || cwd="unknown"
+  echo "[kill] pid=$pid  dir=$cwd"
+  kill "$pid" 2>/dev/null || true
+  count=$((count + 1))
+done
+
+echo "Sent SIGTERM to $count process(es)."

@@ -13,6 +13,7 @@ import (
 
 	"opencoderouter/internal/config"
 	"opencoderouter/internal/discovery"
+	"opencoderouter/internal/launcher"
 	"opencoderouter/internal/proxy"
 	"opencoderouter/internal/registry"
 	"opencoderouter/internal/scanner"
@@ -34,6 +35,9 @@ func main() {
 	hostname := flag.String("hostname", "0.0.0.0", "Hostname/IP to bind the router to")
 	flag.Parse()
 
+	// Positional args are project paths to launch opencode serve in.
+	projectPaths := flag.Args()
+
 	cfg.ListenAddr = fmt.Sprintf("%s:%d", *hostname, cfg.ListenPort)
 
 	if err := cfg.Validate(); err != nil {
@@ -53,6 +57,16 @@ func main() {
 		"scan_interval", cfg.ScanInterval,
 		"mdns", cfg.EnableMDNS,
 	)
+
+	// Launch opencode serve instances for any project paths given as args.
+	var lnch *launcher.Launcher
+	if len(projectPaths) > 0 {
+		lnch = launcher.New(cfg.ScanPortStart, cfg.ScanPortEnd, logger.With("component", "launcher"))
+		if err := lnch.Launch(projectPaths); err != nil {
+			logger.Error("launcher error", "error", err)
+			os.Exit(1)
+		}
+	}
 
 	// Components.
 	reg := registry.New(cfg.StaleAfter, logger.With("component", "registry"))
@@ -82,7 +96,16 @@ func main() {
 	// Start mDNS sync loop in background.
 	if adv != nil {
 		go func() {
-			ticker := time.NewTicker(cfg.ScanInterval + 1*time.Second) // offset from scanner
+			// Initial sync: wait briefly for the first scan to discover backends,
+			// then advertise immediately instead of waiting for the full ticker interval.
+			select {
+			case <-time.After(3 * time.Second):
+				adv.Sync(reg.All())
+			case <-ctx.Done():
+				return
+			}
+
+			ticker := time.NewTicker(cfg.ScanInterval)
 			defer ticker.Stop()
 			for {
 				select {
@@ -125,6 +148,9 @@ func main() {
 	if cfg.EnableMDNS {
 		fmt.Printf("  mDNS:          enabled (type: %s)\n", cfg.MDNSServiceType)
 	}
+	if len(projectPaths) > 0 {
+		fmt.Printf("  Projects:      %d managed\n", len(projectPaths))
+	}
 	fmt.Println()
 
 	// Wait for shutdown signal.
@@ -138,6 +164,11 @@ func main() {
 
 	if adv != nil {
 		adv.Shutdown()
+	}
+
+	// Stop managed opencode serve instances.
+	if lnch != nil {
+		lnch.Shutdown()
 	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -62,6 +62,9 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/api/health":
 		rt.handleAPIHealth(w, r)
 		return
+	case "/api/resolve":
+		rt.handleAPIResolve(w, r)
+		return
 	}
 
 	// Dashboard.
@@ -170,6 +173,7 @@ func (rt *Router) handleAPIBackends(w http.ResponseWriter, r *http.Request) {
 		Version     string    `json:"version"`
 		Domain      string    `json:"domain"`
 		PathPrefix  string    `json:"path_prefix"`
+		URL         string    `json:"url"`
 		LastSeen    time.Time `json:"last_seen"`
 	}
 
@@ -183,6 +187,7 @@ func (rt *Router) handleAPIBackends(w http.ResponseWriter, r *http.Request) {
 			Version:     b.Version,
 			Domain:      rt.cfg.DomainFor(b.Slug),
 			PathPrefix:  fmt.Sprintf("/%s/", b.Slug),
+			URL:         fmt.Sprintf("http://localhost:%d/%s/", rt.cfg.ListenPort, b.Slug),
 			LastSeen:    b.LastSeen,
 		})
 	}
@@ -198,6 +203,64 @@ func (rt *Router) handleAPIHealth(w http.ResponseWriter, r *http.Request) {
 		"healthy":  true,
 		"username": rt.cfg.Username,
 		"backends": rt.registry.Len(),
+	})
+}
+
+// handleAPIResolve resolves a project path or name to its routing info.
+// External agents use this to discover the correct URL for a project.
+//
+//	GET /api/resolve?path=/home/alice/myproject
+//	GET /api/resolve?name=myproject
+func (rt *Router) handleAPIResolve(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	projectPath := r.URL.Query().Get("path")
+	projectName := r.URL.Query().Get("name")
+
+	if projectPath == "" && projectName == "" {
+		http.Error(w, `missing "path" or "name" query parameter`, http.StatusBadRequest)
+		return
+	}
+
+	var backend *registry.Backend
+	var ok bool
+
+	if projectPath != "" {
+		backend, ok = rt.registry.LookupByPath(projectPath)
+	} else {
+		// Bare name lookup: slugify and look up directly.
+		backend, ok = rt.registry.Lookup(registry.Slugify(projectName))
+	}
+
+	if !ok {
+		query := projectPath
+		if query == "" {
+			query = projectName
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":  "not_found",
+			"query":  query,
+			"detail": "no backend found for this project",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"slug":         backend.Slug,
+		"project_name": backend.ProjectName,
+		"project_path": backend.ProjectPath,
+		"port":         backend.Port,
+		"version":      backend.Version,
+		"domain":       rt.cfg.DomainFor(backend.Slug),
+		"path_prefix":  fmt.Sprintf("/%s/", backend.Slug),
+		"url":          fmt.Sprintf("http://localhost:%d/%s/", rt.cfg.ListenPort, backend.Slug),
+		"last_seen":    backend.LastSeen,
 	})
 }
 
