@@ -12,8 +12,9 @@ import (
 
 // FooterContext controls context-sensitive hints in the footer.
 type FooterContext struct {
-	ModalOpen   bool
-	SearchFocus bool
+	ModalOpen         bool
+	SearchFocus       bool
+	ErrorDetailActive bool
 }
 
 // FooterHelpBar renders keybinding hints.
@@ -50,6 +51,9 @@ func (f FooterHelpBar) View() string {
 		hints = append(hints, f.keyMap.Refresh, f.keyMap.Quit)
 	} else {
 		hints = append(hints, f.keyMap.ShortHelp()...)
+		if f.context.ErrorDetailActive {
+			hints = append(hints, f.keyMap.ErrorDetail)
+		}
 	}
 
 	parts := make([]string, 0, len(hints))

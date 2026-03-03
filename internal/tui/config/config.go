@@ -56,9 +56,10 @@ type HostsConfig struct {
 
 // HostOverride customizes host display/probe behavior.
 type HostOverride struct {
-	Label        string `mapstructure:"label" yaml:"label"`
-	Priority     int    `mapstructure:"priority" yaml:"priority"`
-	OpencodePath string `mapstructure:"opencode_path" yaml:"opencode_path"`
+	Label        string   `mapstructure:"label" yaml:"label"`
+	Priority     int      `mapstructure:"priority" yaml:"priority"`
+	OpencodePath string   `mapstructure:"opencode_path" yaml:"opencode_path"`
+	ScanPaths    []string `mapstructure:"scan_paths" yaml:"scan_paths"`
 }
 
 // SSHConfig defines CLI ssh options used by probe execution.
@@ -72,23 +73,25 @@ type SSHConfig struct {
 
 // SessionsConfig defines view-level session filtering and limits.
 type SessionsConfig struct {
-	SortBy       string `mapstructure:"sort_by" yaml:"sort_by"`
-	ShowArchived bool   `mapstructure:"show_archived" yaml:"show_archived"`
-	MaxDisplay   int    `mapstructure:"max_display" yaml:"max_display"`
-	EnrichFromDB bool   `mapstructure:"enrich_from_db" yaml:"enrich_from_db"`
+	SortBy       string   `mapstructure:"sort_by" yaml:"sort_by"`
+	ShowArchived bool     `mapstructure:"show_archived" yaml:"show_archived"`
+	MaxDisplay   int      `mapstructure:"max_display" yaml:"max_display"`
+	EnrichFromDB bool     `mapstructure:"enrich_from_db" yaml:"enrich_from_db"`
+	ScanPaths    []string `mapstructure:"scan_paths" yaml:"scan_paths"`
 }
 
 // KeybindingsConfig defines runtime key maps.
 type KeybindingsConfig struct {
-	Attach      string `mapstructure:"attach" yaml:"attach"`
-	Search      string `mapstructure:"search" yaml:"search"`
-	Refresh     string `mapstructure:"refresh" yaml:"refresh"`
-	Quit        string `mapstructure:"quit" yaml:"quit"`
-	NewSession  string `mapstructure:"new_session" yaml:"new_session"`
-	KillSession string `mapstructure:"kill_session" yaml:"kill_session"`
+	Attach       string `mapstructure:"attach" yaml:"attach"`
+	Search       string `mapstructure:"search" yaml:"search"`
+	Refresh      string `mapstructure:"refresh" yaml:"refresh"`
+	Quit         string `mapstructure:"quit" yaml:"quit"`
+	NewSession   string `mapstructure:"new_session" yaml:"new_session"`
+	KillSession  string `mapstructure:"kill_session" yaml:"kill_session"`
 	Inspect      string `mapstructure:"inspect" yaml:"inspect"`
 	CycleView    string `mapstructure:"cycle_view" yaml:"cycle_view"`
 	Authenticate string `mapstructure:"authenticate" yaml:"authenticate"`
+	ErrorDetail  string `mapstructure:"error_detail" yaml:"error_detail"`
 }
 
 // Load reads YAML config from disk and merges it onto defaults.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"time"
 
 	"opencoderouter/internal/tui/components"
@@ -41,6 +42,7 @@ type AppModel struct {
 	tree    components.SessionTreeView
 	inspect components.InspectPanel
 	footer  components.FooterHelpBar
+	toast   components.InlineToast
 	modal   components.ModalLayer
 	spinner components.BrailleSpinner
 
@@ -51,6 +53,8 @@ type AppModel struct {
 	height      int
 	showInspect bool
 }
+
+const errorToastTimeout = 5 * time.Second
 
 // NewApp constructs the root model with injected services.
 func NewApp(cfg config.Config, discoverer Discoverer, proberSvc Prober) *AppModel {
@@ -75,6 +79,7 @@ func NewApp(cfg config.Config, discoverer Discoverer, proberSvc Prober) *AppMode
 		tree:        components.NewSessionTreeView(th),
 		inspect:     components.NewInspectPanel(th),
 		footer:      components.NewFooterHelpBar(keyMap, th),
+		toast:       components.NewInlineToast(th),
 		modal:       components.NewModalLayer(th),
 		spinner:     components.NewBrailleSpinner(cfg.Display.Animation),
 		showInspect: true,
@@ -120,7 +125,17 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, tickCmd())
 
 	case model.ProbeResultMsg:
-		m.applyProbeResult(typed)
+		if toastCmd := m.applyProbeResult(typed); toastCmd != nil {
+			cmds = append(cmds, toastCmd)
+		}
+
+	case model.AttachFinishedMsg:
+		if typed.Err != nil {
+			if toastCmd := m.showErrorToast(typed.Err); toastCmd != nil {
+				cmds = append(cmds, toastCmd)
+			}
+		}
+		cmds = append(cmds, m.refreshCmd())
 
 	case tea.KeyPressMsg:
 		if m.modal.Active() {
@@ -129,7 +144,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if modalCmd != nil {
 				cmds = append(cmds, modalCmd)
 			}
-			m.footer.SetContext(components.FooterContext{ModalOpen: m.modal.Active(), SearchFocus: m.header.SearchFocused()})
+			m.syncFooterContext()
 			return m, tea.Batch(cmds...)
 		}
 
@@ -153,8 +168,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showInspect = true
 			m.resize(m.width, m.height)
 		case keys.Matches(typed.String(), m.keys.Attach):
-			if _, _, session, ok := m.tree.Selected(); ok && session != nil {
-				m.modal.OpenError(fmt.Errorf("attach action not wired for session %s", session.ID))
+			host, _, session, ok := m.tree.Selected()
+			if ok && host != nil && session != nil {
+				cmds = append(cmds, m.attachCmd(*host, *session))
 			}
 		case keys.Matches(typed.String(), m.keys.Authenticate):
 			host, _, _, ok := m.tree.Selected()
@@ -163,6 +179,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if len(bootstrapCmds) > 0 {
 					m.modal.OpenAuthBootstrap(host.Name, bootstrapCmds)
 				}
+			}
+		case keys.Matches(typed.String(), m.keys.ErrorDetail):
+			if m.toast.Visible() && m.lastError != nil {
+				m.modal.OpenError(m.lastError)
 			}
 		}
 	}
@@ -178,9 +198,18 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	}
 
+	toastWasVisible := m.toast.Visible()
+	m.toast, cmd = m.toast.Update(msg)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	if toastWasVisible != m.toast.Visible() {
+		m.resize(m.width, m.height)
+	}
+
 	m.tree.SetFilter(m.header.SearchQuery())
 	m.syncInspectSelection()
-	m.footer.SetContext(components.FooterContext{ModalOpen: m.modal.Active(), SearchFocus: m.header.SearchFocused()})
+	m.syncFooterContext()
 
 	return m, tea.Batch(cmds...)
 }
@@ -196,8 +225,15 @@ func (m *AppModel) View() tea.View {
 	}
 
 	mainPane := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+	toast := m.toast.View()
 	footer := m.footer.View()
-	screen := lipgloss.JoinVertical(lipgloss.Left, header, mainPane, footer)
+
+	sections := []string{header, mainPane}
+	if toast != "" {
+		sections = append(sections, toast)
+	}
+	sections = append(sections, footer)
+	screen := lipgloss.JoinVertical(lipgloss.Left, sections...)
 
 	if m.modal.Active() {
 		screen = lipgloss.JoinVertical(lipgloss.Left, screen, m.modal.View())
@@ -233,7 +269,7 @@ func (m *AppModel) refreshCmd() tea.Cmd {
 	}
 }
 
-func (m *AppModel) applyProbeResult(msg model.ProbeResultMsg) {
+func (m *AppModel) applyProbeResult(msg model.ProbeResultMsg) tea.Cmd {
 	m.hosts = append([]model.Host(nil), msg.Hosts...)
 	m.tree.SetHosts(m.hosts)
 	m.header.SetStats(calculateFleetStats(m.hosts))
@@ -259,11 +295,14 @@ func (m *AppModel) applyProbeResult(msg model.ProbeResultMsg) {
 			}
 		}
 		if hasNonAuthErrors {
-			m.modal.OpenError(msg.Err)
+			toastCmd := m.showErrorToast(msg.Err)
+			m.syncInspectSelection()
+			return toastCmd
 		}
 	}
 
 	m.syncInspectSelection()
+	return nil
 }
 
 func (m *AppModel) syncInspectSelection() {
@@ -280,10 +319,15 @@ func (m *AppModel) resize(width, height int) {
 	m.height = height
 
 	m.header.SetSize(width)
+	m.toast.SetSize(width)
 	m.footer.SetSize(width)
 	m.modal.SetSize(width, height)
 
-	mainHeight := maxInt(1, height-4)
+	chromeHeight := 4
+	if m.toast.Visible() {
+		chromeHeight++
+	}
+	mainHeight := maxInt(1, height-chromeHeight)
 	if !m.showInspect {
 		m.tree.SetSize(width, mainHeight)
 		m.inspect.SetSize(0, mainHeight)
@@ -378,4 +422,48 @@ func (m *AppModel) getMultiHopBootstrapCmds(host model.Host) []string {
 	}
 
 	return cmds
+}
+
+func (m *AppModel) attachCmd(host model.Host, session model.Session) tea.Cmd {
+	bin := host.OpencodeBin
+	if bin == "" {
+		bin = "opencode"
+	}
+
+	var remoteCmd string
+	if session.Directory != "" {
+		remoteCmd = fmt.Sprintf(
+			`OC=$(command -v %s 2>/dev/null || echo "$HOME/.opencode/bin/%s"); cd %s && exec "$OC" -s %s`,
+			bin, bin, session.Directory, session.ID,
+		)
+	} else {
+		remoteCmd = fmt.Sprintf(
+			`OC=$(command -v %s 2>/dev/null || echo "$HOME/.opencode/bin/%s"); exec "$OC" -s %s`,
+			bin, bin, session.ID,
+		)
+	}
+
+	c := exec.Command("ssh", "-t", host.Name, remoteCmd)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return model.AttachFinishedMsg{Err: err}
+	})
+}
+
+func (m *AppModel) showErrorToast(err error) tea.Cmd {
+	m.lastError = err
+	if err == nil {
+		return nil
+	}
+
+	cmd := m.toast.Show(err.Error(), components.ToastSeverityError, errorToastTimeout)
+	m.resize(m.width, m.height)
+	return cmd
+}
+
+func (m *AppModel) syncFooterContext() {
+	m.footer.SetContext(components.FooterContext{
+		ModalOpen:         m.modal.Active(),
+		SearchFocus:       m.header.SearchFocused(),
+		ErrorDetailActive: m.toast.Visible() && m.lastError != nil,
+	})
 }

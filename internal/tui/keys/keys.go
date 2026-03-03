@@ -15,15 +15,16 @@ type Binding struct {
 
 // KeyMap is the complete set of runtime bindings used by the TUI.
 type KeyMap struct {
-	Attach      Binding
-	Search      Binding
-	Refresh     Binding
-	Quit        Binding
-	NewSession  Binding
-	KillSession Binding
-	Inspect     Binding
+	Attach       Binding
+	Search       Binding
+	Refresh      Binding
+	Quit         Binding
+	NewSession   Binding
+	KillSession  Binding
+	Inspect      Binding
 	CycleView    Binding
 	Authenticate Binding
+	ErrorDetail  Binding
 
 	Up       Binding
 	Down     Binding
@@ -44,6 +45,7 @@ func NewKeyMap(cfg config.KeybindingsConfig) KeyMap {
 	inspect := firstNonEmpty(cfg.Inspect, "i")
 	cycleView := firstNonEmpty(cfg.CycleView, "tab")
 	authenticate := firstNonEmpty(cfg.Authenticate, "a")
+	errorDetail := firstNonEmpty(cfg.ErrorDetail, "e")
 
 	return KeyMap{
 		Attach:       Binding{Key: attach, Description: "attach"},
@@ -55,6 +57,7 @@ func NewKeyMap(cfg config.KeybindingsConfig) KeyMap {
 		Inspect:      Binding{Key: inspect, Description: "inspect"},
 		CycleView:    Binding{Key: cycleView, Description: "cycle"},
 		Authenticate: Binding{Key: authenticate, Description: "auth"},
+		ErrorDetail:  Binding{Key: errorDetail, Description: "error"},
 		Up:           Binding{Key: "up", Description: "up"},
 		Down:         Binding{Key: "down", Description: "down"},
 		Toggle:       Binding{Key: "enter", Description: "toggle"},
@@ -79,7 +82,7 @@ func (k KeyMap) FullHelp() [][]Binding {
 	return [][]Binding{
 		{k.Search, k.Refresh, k.CycleView, k.Quit},
 		{k.Up, k.Down, k.Toggle, k.Attach, k.Inspect},
-		{k.NewSession, k.KillSession, k.Authenticate, k.Collapse, k.Expand, k.Close},
+		{k.NewSession, k.KillSession, k.Authenticate, k.ErrorDetail, k.Collapse, k.Expand, k.Close},
 	}
 }
 
