@@ -1,11 +1,13 @@
 package probe
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -150,12 +152,37 @@ func (s *ProbeService) ProbeHosts(ctx context.Context, hosts []model.Host) ([]mo
 	return updated, nil
 }
 
-// probeHost executes one SSH command and parses returned session JSON.
-func (s *ProbeService) probeHost(ctx context.Context, host model.Host) (model.Host, error) {
-	remoteCmd := "command -v opencode && opencode session list --format json"
-	if host.OpencodeBin != "" {
-		remoteCmd = fmt.Sprintf("command -v %s && %s session list --format json", host.OpencodeBin, host.OpencodeBin)
+func (s *ProbeService) scanPathsForHost(host model.Host) []string {
+	if override, ok := s.cfg.Hosts.Overrides[host.Name]; ok && len(override.ScanPaths) > 0 {
+		return override.ScanPaths
 	}
+	if len(s.cfg.Sessions.ScanPaths) > 0 {
+		return s.cfg.Sessions.ScanPaths
+	}
+	return []string{"~"}
+}
+
+func (s *ProbeService) buildRemoteCmd(host model.Host) string {
+	paths := s.scanPathsForHost(host)
+	pathList := strings.Join(paths, " ")
+
+	bin := host.OpencodeBin
+	if bin == "" {
+		bin = "opencode"
+	}
+
+	return fmt.Sprintf(
+		`OC=$(command -v %s 2>/dev/null || echo "$HOME/.opencode/bin/%s"); `+
+			`if [ -x "$OC" ]; then `+
+			`find %s -maxdepth 2 -name .opencode -type d 2>/dev/null | while IFS= read -r d; do `+
+			`(cd "$(dirname "$d")" && "$OC" session list --format json 2>/dev/null); `+
+			`done; fi`,
+		bin, bin, pathList,
+	)
+}
+
+func (s *ProbeService) probeHost(ctx context.Context, host model.Host) (model.Host, error) {
+	remoteCmd := s.buildRemoteCmd(host)
 
 	args := s.buildSSHArgs(host, remoteCmd)
 	out, err := s.runner.Run(ctx, "ssh", args...)
@@ -186,7 +213,6 @@ func (s *ProbeService) probeHost(ctx context.Context, host model.Host) (model.Ho
 	host.LastSeen = s.nowFn()
 	host.LastError = ""
 
-	// TODO: enrich sessions with metadata from local DB when enabled.
 	return host, nil
 }
 
@@ -220,30 +246,37 @@ type remoteSession struct {
 	Status       string   `json:"status"`
 	MessageCount int      `json:"message_count"`
 	Agents       []string `json:"agents"`
+	// opencode native fields
+	Updated   json.Number `json:"updated"`
+	Created   json.Number `json:"created"`
+	Directory string      `json:"directory"`
+	ProjectID string      `json:"projectId"`
 }
 
 type remoteEnvelope struct {
 	Sessions []remoteSession `json:"sessions"`
 }
 
-// parseSessions decodes opencode JSON output into domain sessions.
 func (s *ProbeService) parseSessions(raw []byte) ([]model.Session, error) {
-	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
 		return nil, nil
 	}
 
-	list := make([]remoteSession, 0)
-	if strings.HasPrefix(trimmed, "[") {
-		if err := json.Unmarshal([]byte(trimmed), &list); err != nil {
+	var list []remoteSession
+
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	for dec.More() {
+		var batch []remoteSession
+		if err := dec.Decode(&batch); err != nil {
+			var env remoteEnvelope
+			if json.Unmarshal(trimmed, &env) == nil {
+				list = env.Sessions
+				break
+			}
 			return nil, err
 		}
-	} else {
-		var env remoteEnvelope
-		if err := json.Unmarshal([]byte(trimmed), &env); err != nil {
-			return nil, err
-		}
-		list = env.Sessions
+		list = append(list, batch...)
 	}
 
 	now := s.nowFn()
@@ -258,11 +291,13 @@ func (s *ProbeService) parseSessions(raw []byte) ([]model.Session, error) {
 		if status == model.SessionStatusArchived && !s.cfg.Sessions.ShowArchived {
 			continue
 		}
-		lastActivity := parseTimestamp(rs.LastActivity)
+		lastActivity := resolveTimestamp(rs)
+		project := resolveProject(rs)
 		sessions = append(sessions, model.Session{
 			ID:           rs.ID,
-			Project:      rs.Project,
+			Project:      project,
 			Title:        rs.Title,
+			Directory:    rs.Directory,
 			LastActivity: lastActivity,
 			Status:       status,
 			MessageCount: rs.MessageCount,
@@ -278,6 +313,33 @@ func (s *ProbeService) parseSessions(raw []byte) ([]model.Session, error) {
 	}
 
 	return sessions, nil
+}
+
+func resolveTimestamp(rs remoteSession) time.Time {
+	if rs.LastActivity != "" {
+		return parseTimestamp(rs.LastActivity)
+	}
+	if rs.Updated.String() != "" {
+		if ms, err := rs.Updated.Int64(); err == nil && ms > 0 {
+			return time.UnixMilli(ms)
+		}
+	}
+	if rs.Created.String() != "" {
+		if ms, err := rs.Created.Int64(); err == nil && ms > 0 {
+			return time.UnixMilli(ms)
+		}
+	}
+	return time.Time{}
+}
+
+func resolveProject(rs remoteSession) string {
+	if rs.Project != "" {
+		return rs.Project
+	}
+	if rs.Directory != "" {
+		return filepath.Base(rs.Directory)
+	}
+	return ""
 }
 
 // groupSessionsByProject folds sessions into Project buckets.
@@ -377,7 +439,6 @@ func (s *ProbeService) AuthBootstrapCmd(host model.Host) string {
 	)
 	return cmd
 }
-
 
 // jumpProviderSet returns the set of alias names that serve as jump hosts.
 func jumpProviderSet(hosts []model.Host) map[string]bool {

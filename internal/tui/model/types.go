@@ -79,6 +79,7 @@ type Session struct {
 	ID           string
 	Project      string
 	Title        string
+	Directory    string
 	LastActivity time.Time
 	Status       SessionStatus
 	MessageCount int

@@ -95,6 +95,70 @@ func TestProbeHosts_PropagatesErrors(t *testing.T) {
 	}
 }
 
+func TestProbeHosts_OpencodeNativeFormat(t *testing.T) {
+	cfg := config.DefaultConfig()
+	runner := &probeRunnerMock{
+		output: map[string]string{
+			"dev-2": `[
+				{"id":"s1","title":"Fix bug","updated":1772565534745,"created":1772563561839,"projectId":"abc123","directory":"/home/user/DeviceEmulator"},
+				{"id":"s2","title":"Add feature","updated":1772565000000,"created":1772560000000,"projectId":"def456","directory":"/home/user/MobiCom"}
+			]`,
+		},
+		err: map[string]error{},
+	}
+
+	svc := NewProbeService(cfg, runner, NewCacheStore(time.Minute))
+	hosts, err := svc.ProbeHosts(context.Background(), []model.Host{{Name: "dev-2"}})
+	if err != nil {
+		t.Fatalf("probe failed: %v", err)
+	}
+	if hosts[0].Status != model.HostStatusOnline {
+		t.Fatalf("expected online, got %s", hosts[0].Status)
+	}
+	if len(hosts[0].Projects) != 2 {
+		t.Fatalf("expected 2 projects, got %d", len(hosts[0].Projects))
+	}
+	found := false
+	for _, p := range hosts[0].Projects {
+		if p.Name == "DeviceEmulator" {
+			found = true
+			if len(p.Sessions) != 1 || p.Sessions[0].ID != "s1" {
+				t.Fatalf("unexpected sessions for DeviceEmulator: %+v", p.Sessions)
+			}
+			if p.Sessions[0].LastActivity.IsZero() {
+				t.Fatal("expected non-zero LastActivity from epoch ms")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("project DeviceEmulator not found")
+	}
+}
+
+func TestProbeHosts_MultiArraySweep(t *testing.T) {
+	cfg := config.DefaultConfig()
+	runner := &probeRunnerMock{
+		output: map[string]string{
+			"dev-3": `[{"id":"s1","title":"A","updated":1772565534745,"directory":"/home/user/proj-a"}]` +
+				`[{"id":"s2","title":"B","updated":1772565000000,"directory":"/home/user/proj-b"}]`,
+		},
+		err: map[string]error{},
+	}
+
+	svc := NewProbeService(cfg, runner, NewCacheStore(time.Minute))
+	hosts, err := svc.ProbeHosts(context.Background(), []model.Host{{Name: "dev-3"}})
+	if err != nil {
+		t.Fatalf("probe failed: %v", err)
+	}
+	if len(hosts[0].Projects) != 2 {
+		t.Fatalf("expected 2 projects from multi-array, got %d", len(hosts[0].Projects))
+	}
+	total := hosts[0].SessionCount()
+	if total != 2 {
+		t.Fatalf("expected 2 sessions total, got %d", total)
+	}
+}
+
 func TestProbeHosts_UsesCache(t *testing.T) {
 	cfg := config.DefaultConfig()
 	runner := &probeRunnerMock{
