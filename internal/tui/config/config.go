@@ -65,6 +65,7 @@ type HostOverride struct {
 type SSHConfig struct {
 	ControlMaster  string `mapstructure:"control_master" yaml:"control_master"`
 	ControlPersist int    `mapstructure:"control_persist" yaml:"control_persist"`
+	ControlPath    string `mapstructure:"control_path" yaml:"control_path"`
 	BatchMode      bool   `mapstructure:"batch_mode" yaml:"batch_mode"`
 	ConnectTimeout int    `mapstructure:"connect_timeout" yaml:"connect_timeout"`
 }
@@ -85,8 +86,9 @@ type KeybindingsConfig struct {
 	Quit        string `mapstructure:"quit" yaml:"quit"`
 	NewSession  string `mapstructure:"new_session" yaml:"new_session"`
 	KillSession string `mapstructure:"kill_session" yaml:"kill_session"`
-	Inspect     string `mapstructure:"inspect" yaml:"inspect"`
-	CycleView   string `mapstructure:"cycle_view" yaml:"cycle_view"`
+	Inspect      string `mapstructure:"inspect" yaml:"inspect"`
+	CycleView    string `mapstructure:"cycle_view" yaml:"cycle_view"`
+	Authenticate string `mapstructure:"authenticate" yaml:"authenticate"`
 }
 
 // Load reads YAML config from disk and merges it onto defaults.

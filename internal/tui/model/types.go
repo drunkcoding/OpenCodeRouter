@@ -28,6 +28,8 @@ const (
 	HostStatusOffline HostStatus = "offline"
 	// HostStatusError indicates probe/discovery failures with details.
 	HostStatusError HostStatus = "error"
+	// HostStatusAuthRequired indicates the host is reachable but requires password authentication.
+	HostStatusAuthRequired HostStatus = "auth_required"
 )
 
 // SessionStatus tracks lifecycle of a remote session.

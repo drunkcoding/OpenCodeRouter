@@ -22,7 +22,8 @@ type KeyMap struct {
 	NewSession  Binding
 	KillSession Binding
 	Inspect     Binding
-	CycleView   Binding
+	CycleView    Binding
+	Authenticate Binding
 
 	Up       Binding
 	Down     Binding
@@ -42,22 +43,24 @@ func NewKeyMap(cfg config.KeybindingsConfig) KeyMap {
 	killSession := firstNonEmpty(cfg.KillSession, "d")
 	inspect := firstNonEmpty(cfg.Inspect, "i")
 	cycleView := firstNonEmpty(cfg.CycleView, "tab")
+	authenticate := firstNonEmpty(cfg.Authenticate, "a")
 
 	return KeyMap{
-		Attach:      Binding{Key: attach, Description: "attach"},
-		Search:      Binding{Key: search, Description: "search"},
-		Refresh:     Binding{Key: refresh, Description: "refresh"},
-		Quit:        Binding{Key: quit, Description: "quit"},
-		NewSession:  Binding{Key: newSession, Description: "new"},
-		KillSession: Binding{Key: killSession, Description: "kill"},
-		Inspect:     Binding{Key: inspect, Description: "inspect"},
-		CycleView:   Binding{Key: cycleView, Description: "cycle"},
-		Up:          Binding{Key: "up", Description: "up"},
-		Down:        Binding{Key: "down", Description: "down"},
-		Toggle:      Binding{Key: "enter", Description: "toggle"},
-		Collapse:    Binding{Key: "left", Description: "collapse"},
-		Expand:      Binding{Key: "right", Description: "expand"},
-		Close:       Binding{Key: "esc", Description: "close"},
+		Attach:       Binding{Key: attach, Description: "attach"},
+		Search:       Binding{Key: search, Description: "search"},
+		Refresh:      Binding{Key: refresh, Description: "refresh"},
+		Quit:         Binding{Key: quit, Description: "quit"},
+		NewSession:   Binding{Key: newSession, Description: "new"},
+		KillSession:  Binding{Key: killSession, Description: "kill"},
+		Inspect:      Binding{Key: inspect, Description: "inspect"},
+		CycleView:    Binding{Key: cycleView, Description: "cycle"},
+		Authenticate: Binding{Key: authenticate, Description: "auth"},
+		Up:           Binding{Key: "up", Description: "up"},
+		Down:         Binding{Key: "down", Description: "down"},
+		Toggle:       Binding{Key: "enter", Description: "toggle"},
+		Collapse:     Binding{Key: "left", Description: "collapse"},
+		Expand:       Binding{Key: "right", Description: "expand"},
+		Close:        Binding{Key: "esc", Description: "close"},
 	}
 }
 
@@ -68,7 +71,7 @@ func Matches(pressed string, binding Binding) bool {
 
 // ShortHelp returns compact bindings suitable for footer rendering.
 func (k KeyMap) ShortHelp() []Binding {
-	return []Binding{k.Search, k.Refresh, k.NewSession, k.KillSession, k.Attach, k.Quit}
+	return []Binding{k.Search, k.Refresh, k.Authenticate, k.NewSession, k.Attach, k.Quit}
 }
 
 // FullHelp returns grouped bindings for expanded help views.
@@ -76,7 +79,7 @@ func (k KeyMap) FullHelp() [][]Binding {
 	return [][]Binding{
 		{k.Search, k.Refresh, k.CycleView, k.Quit},
 		{k.Up, k.Down, k.Toggle, k.Attach, k.Inspect},
-		{k.NewSession, k.KillSession, k.Collapse, k.Expand, k.Close},
+		{k.NewSession, k.KillSession, k.Authenticate, k.Collapse, k.Expand, k.Close},
 	}
 }
 

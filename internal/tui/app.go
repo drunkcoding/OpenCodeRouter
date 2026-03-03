@@ -156,6 +156,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if _, _, session, ok := m.tree.Selected(); ok && session != nil {
 				m.modal.OpenError(fmt.Errorf("attach action not wired for session %s", session.ID))
 			}
+		case keys.Matches(typed.String(), m.keys.Authenticate):
+			host, _, _, ok := m.tree.Selected()
+			if ok && host != nil && host.Status == model.HostStatusAuthRequired {
+				bootstrapCmd := m.getAuthBootstrapCmd(*host)
+				m.modal.OpenAuthBootstrap(host.Name, bootstrapCmd)
+			}
 		}
 	}
 
@@ -239,7 +245,20 @@ func (m *AppModel) applyProbeResult(msg model.ProbeResultMsg) {
 
 	m.lastError = msg.Err
 	if msg.Err != nil {
-		m.modal.OpenError(msg.Err)
+		// Don't open error modal for auth-required hosts; those are handled
+		// via the dedicated auth bootstrap flow.
+		hasNonAuthErrors := false
+		for _, h := range msg.Hosts {
+			if h.Status == model.HostStatusError || h.Status == model.HostStatusOffline {
+				if h.LastError != "" {
+					hasNonAuthErrors = true
+					break
+				}
+			}
+		}
+		if hasNonAuthErrors {
+			m.modal.OpenError(msg.Err)
+		}
 	}
 
 	m.syncInspectSelection()
@@ -283,8 +302,13 @@ func (m *AppModel) resize(width, height int) {
 func calculateFleetStats(hosts []model.Host) components.FleetStats {
 	stats := components.FleetStats{HostsTotal: len(hosts)}
 	for _, host := range hosts {
-		if host.Status == model.HostStatusOnline {
+		switch host.Status {
+		case model.HostStatusOnline:
 			stats.HostsOnline++
+		case model.HostStatusAuthRequired:
+			// Count auth-required hosts separately; don't inflate online count.
+		default:
+			// offline, error, probing — no online increment.
 		}
 		stats.SessionsTotal += host.SessionCount()
 	}
@@ -302,4 +326,26 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func (m *AppModel) getAuthBootstrapCmd(host model.Host) string {
+	controlPath := m.cfg.SSH.ControlPath
+	if controlPath == "" {
+		controlPath = "~/.ssh/ocr-%C"
+	}
+	persist := m.cfg.SSH.ControlPersist
+	if persist <= 0 {
+		persist = 600
+	}
+	timeout := m.cfg.SSH.ConnectTimeout
+	if timeout <= 0 {
+		timeout = 10
+	}
+	return fmt.Sprintf(
+		"ssh -o ControlMaster=yes -o ControlPath=%s -o ControlPersist=%d -o ConnectTimeout=%d -Nf %s",
+		controlPath,
+		persist,
+		timeout,
+		host.Name,
+	)
 }

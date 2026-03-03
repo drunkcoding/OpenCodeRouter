@@ -23,6 +23,8 @@ const (
 	ModalTypeConfirmKill ModalType = "confirm_kill"
 	// ModalTypeErrorDetail displays detailed errors.
 	ModalTypeErrorDetail ModalType = "error_detail"
+	// ModalTypeAuthBootstrap shows SSH ControlMaster bootstrap command.
+	ModalTypeAuthBootstrap ModalType = "auth_bootstrap"
 )
 
 // ModalLayer renders and updates overlay dialogs.
@@ -98,6 +100,23 @@ func (m *ModalLayer) OpenError(err error) {
 	m.input.Blur()
 }
 
+// OpenAuthBootstrap opens a modal showing the SSH ControlMaster bootstrap command.
+// The user copies and runs this command to establish a persistent socket.
+func (m *ModalLayer) OpenAuthBootstrap(hostName, bootstrapCmd string) {
+	m.active = true
+	m.modalType = ModalTypeAuthBootstrap
+	m.title = fmt.Sprintf("Authenticate: %s", hostName)
+	m.body = fmt.Sprintf(
+		"This host requires password authentication.\n"+
+			"Run the following command in another terminal:\n\n"+
+			"  %s\n\n"+
+			"Then press 'r' to refresh.",
+		bootstrapCmd,
+	)
+	m.confirmText = "Esc close"
+	m.input.Blur()
+}
+
 // Close dismisses any active modal.
 func (m *ModalLayer) Close() {
 	m.active = false
@@ -146,7 +165,7 @@ func (m ModalLayer) Update(msg tea.Msg) (ModalLayer, tea.Cmd) {
 			case "n", "esc":
 				m.Close()
 			}
-		case ModalTypeErrorDetail:
+		case ModalTypeErrorDetail, ModalTypeAuthBootstrap:
 			if keyMsg.String() == "esc" || keyMsg.String() == "enter" {
 				m.Close()
 			}

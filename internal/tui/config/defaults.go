@@ -47,6 +47,7 @@ func DefaultConfig() Config {
 		SSH: SSHConfig{
 			ControlMaster:  "auto",
 			ControlPersist: 60,
+			ControlPath:    "~/.ssh/ocr-%C",
 			BatchMode:      true,
 			ConnectTimeout: 10,
 		},
@@ -63,8 +64,9 @@ func DefaultConfig() Config {
 			Quit:        "q",
 			NewSession:  "n",
 			KillSession: "d",
-			Inspect:     "i",
-			CycleView:   "tab",
+			Inspect:      "i",
+			CycleView:    "tab",
+			Authenticate: "a",
 		},
 	}
 }

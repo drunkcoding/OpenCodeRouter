@@ -146,6 +146,11 @@ func (s *ProbeService) probeHost(ctx context.Context, host model.Host) (model.Ho
 	args := s.buildSSHArgs(host, remoteCmd)
 	out, err := s.runner.Run(ctx, "ssh", args...)
 	if err != nil {
+		if isAuthError(err) {
+			host.Status = model.HostStatusAuthRequired
+			host.LastError = "password authentication required"
+			return host, fmt.Errorf("probe host %q: auth required", host.Name)
+		}
 		host.Status = model.HostStatusOffline
 		host.LastError = err.Error()
 		return host, fmt.Errorf("probe host %q: %w", host.Name, err)
@@ -185,6 +190,9 @@ func (s *ProbeService) buildSSHArgs(host model.Host, remoteCmd string) []string 
 	}
 	if s.cfg.SSH.ControlPersist > 0 {
 		args = append(args, "-o", "ControlPersist="+strconv.Itoa(s.cfg.SSH.ControlPersist))
+	}
+	if s.cfg.SSH.ControlPath != "" {
+		args = append(args, "-o", "ControlPath="+s.cfg.SSH.ControlPath)
 	}
 	args = append(args, host.Name, remoteCmd)
 	return args
@@ -303,4 +311,55 @@ func parseTimestamp(value string) time.Time {
 		return time.Time{}
 	}
 	return t
+}
+
+// isAuthError checks whether an SSH error indicates authentication failure
+// (as opposed to network unreachability). BatchMode=yes causes ssh to exit with
+// specific error messages when password auth is the only option.
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	authIndicators := []string{
+		"permission denied",
+		"no more authentication methods",
+		"publickey,password",
+		"keyboard-interactive",
+		"too many authentication failures",
+		"authentication failed",
+	}
+	for _, indicator := range authIndicators {
+		if strings.Contains(msg, indicator) {
+			return true
+		}
+	}
+	return false
+}
+
+// AuthBootstrapCmd returns the SSH command a user should run to establish a
+// ControlMaster connection for a password-protected host. The resulting socket
+// is reused by subsequent BatchMode=yes probes.
+func (s *ProbeService) AuthBootstrapCmd(host model.Host) string {
+	controlPath := s.cfg.SSH.ControlPath
+	if controlPath == "" {
+		controlPath = "~/.ssh/ocr-%C"
+	}
+	persist := s.cfg.SSH.ControlPersist
+	if persist <= 0 {
+		persist = 600
+	}
+	timeout := s.cfg.SSH.ConnectTimeout
+	if timeout <= 0 {
+		timeout = 10
+	}
+
+	cmd := fmt.Sprintf(
+		"ssh -o ControlMaster=yes -o ControlPath=%s -o ControlPersist=%d -o ConnectTimeout=%d -Nf %s",
+		controlPath,
+		persist,
+		timeout,
+		host.Name,
+	)
+	return cmd
 }
