@@ -107,7 +107,7 @@ func (h HeaderBar) Update(msg tea.Msg) (HeaderBar, tea.Cmd) {
 
 // View renders the header line.
 func (h HeaderBar) View(now time.Time, spinnerFrame string) string {
-	title := h.theme.HeaderTitle.Render("Night Ops Console")
+	title := h.theme.HeaderTitle.Render("OpenCode Router")
 	if spinnerFrame != "" {
 		title = lipgloss.JoinHorizontal(lipgloss.Center, spinnerFrame+" ", title)
 	}
