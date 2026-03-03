@@ -41,6 +41,10 @@ type Theme struct {
 // ByName returns the requested theme, falling back to NightOps.
 func ByName(name string) Theme {
 	switch name {
+	case "auto":
+		return Auto()
+	case "nightops":
+		return NightOps()
 	case "light":
 		return Light()
 	case "minimal":
