@@ -355,7 +355,7 @@ A keyboard-driven terminal UI for managing OpenCode sessions across your entire 
 - **Session actions** — attach, create, inspect, kill/archive
 - **Auto-refresh** — configurable polling with visual countdown
 - **Parallel probing** — worker pool with connection multiplexing (SSH ControlMaster)
-- **Themes** — Night Ops (dark, default), Light, Minimal (ASCII-safe fallback)
+- **Themes** — Auto (adapts to terminal background, default), Night Ops (dark), Light, Minimal (ASCII-safe fallback)
 
 ### Quick start
 
@@ -398,7 +398,7 @@ polling:
   max_parallel: 10     # Concurrent SSH connections
 
 display:
-  theme: nightops      # nightops, light, minimal
+  theme: auto          # auto, nightops, light, minimal
   unicode: true        # false for ASCII-only terminals
   animation: true      # Braille spinners, countdowns
   active_threshold: 10m  # Sessions active within this = ACTIVE
@@ -484,7 +484,7 @@ Each probe is a single SSH round-trip. Unreachable hosts show as ○ offline and
 │       ├── discovery/             # SSH config parser + host resolver
 │       ├── probe/                 # SSH probe worker pool + TTL cache
 │       ├── model/                 # Domain types + Bubble Tea messages
-│       ├── theme/                 # Lipgloss style themes (nightops, light, minimal)
+│       ├── theme/                 # Lipgloss style themes (auto, nightops, light, minimal)
 │       └── keys/                  # Keybinding definitions
 ├── go.mod
 └── go.sum
