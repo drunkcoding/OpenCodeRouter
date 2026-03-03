@@ -100,19 +100,36 @@ func (m *ModalLayer) OpenError(err error) {
 	m.input.Blur()
 }
 
-// OpenAuthBootstrap opens a modal showing the SSH ControlMaster bootstrap command.
-// The user copies and runs this command to establish a persistent socket.
-func (m *ModalLayer) OpenAuthBootstrap(hostName, bootstrapCmd string) {
+// OpenAuthBootstrap opens a modal showing SSH ControlMaster bootstrap commands.
+// For multi-hop scenarios, it shows ordered commands for each hop that needs auth.
+func (m *ModalLayer) OpenAuthBootstrap(hostName string, bootstrapCmds []string) {
 	m.active = true
 	m.modalType = ModalTypeAuthBootstrap
 	m.title = fmt.Sprintf("Authenticate: %s", hostName)
-	m.body = fmt.Sprintf(
-		"This host requires password authentication.\n"+
-			"Run the following command in another terminal:\n\n"+
-			"  %s\n\n"+
-			"Then press 'r' to refresh.",
-		bootstrapCmd,
-	)
+
+	if len(bootstrapCmds) == 0 {
+		m.body = "No authentication commands needed."
+		m.confirmText = "Esc close"
+		m.input.Blur()
+		return
+	}
+
+	var b strings.Builder
+	if len(bootstrapCmds) == 1 {
+		b.WriteString("This host requires password authentication.\n")
+		b.WriteString("Run the following command in another terminal:\n\n")
+		b.WriteString(fmt.Sprintf("  %s\n\n", bootstrapCmds[0]))
+	} else {
+		b.WriteString("Multi-hop authentication required.\n")
+		b.WriteString("Run these commands in order:\n\n")
+		for i, cmd := range bootstrapCmds {
+			b.WriteString(fmt.Sprintf("  %d) %s\n", i+1, cmd))
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("Then press 'r' to refresh.")
+
+	m.body = b.String()
 	m.confirmText = "Esc close"
 	m.input.Blur()
 }

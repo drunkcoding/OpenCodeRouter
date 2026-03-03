@@ -73,7 +73,8 @@ type probeResult struct {
 	err   error
 }
 
-// ProbeHosts probes hosts in parallel and returns updated host structures.
+// ProbeHosts runs transport preflight for jump providers, then probes all hosts.
+// Hosts with unresolved jump dependencies are marked TransportBlocked.
 func (s *ProbeService) ProbeHosts(ctx context.Context, hosts []model.Host) ([]model.Host, error) {
 	if len(hosts) == 0 {
 		return nil, nil
@@ -83,6 +84,14 @@ func (s *ProbeService) ProbeHosts(ctx context.Context, hosts []model.Host) ([]mo
 		s.cache.PurgeExpired()
 	}
 
+	// Phase 1: Transport preflight for jump providers
+	jumpProviders := jumpProviderSet(hosts)
+	if len(jumpProviders) > 0 {
+		s.transportPreflight(ctx, hosts, jumpProviders)
+		propagateBlocked(hosts)
+	}
+
+	// Phase 2: Session probe (skip blocked hosts)
 	updated := make([]model.Host, len(hosts))
 	jobs := make(chan probeJob)
 	results := make(chan probeResult)
@@ -103,6 +112,11 @@ func (s *ProbeService) ProbeHosts(ctx context.Context, hosts []model.Host) ([]mo
 
 	pending := 0
 	for i, host := range hosts {
+		// Skip blocked hosts
+		if host.Transport == model.TransportBlocked {
+			updated[i] = host
+			continue
+		}
 		if s.cache != nil {
 			if cached, ok := s.cache.Get(host.Name); ok {
 				updated[i] = cached
@@ -362,4 +376,114 @@ func (s *ProbeService) AuthBootstrapCmd(host model.Host) string {
 		host.Name,
 	)
 	return cmd
+}
+
+
+// jumpProviderSet returns the set of alias names that serve as jump hosts.
+func jumpProviderSet(hosts []model.Host) map[string]bool {
+	providers := make(map[string]bool)
+	for _, h := range hosts {
+		for _, dep := range h.DependsOn {
+			providers[dep] = true
+		}
+	}
+	return providers
+}
+
+// transportPreflight probes jump providers with a lightweight `ssh <alias> true`
+// to check reachability before running full session probes.
+func (s *ProbeService) transportPreflight(ctx context.Context, hosts []model.Host, providers map[string]bool) {
+	type preflightResult struct {
+		idx    int
+		status model.TransportStatus
+		err    error
+	}
+
+	results := make(chan preflightResult)
+	count := 0
+	for i, h := range hosts {
+		if !providers[h.Name] {
+			continue
+		}
+		count++
+		go func(idx int, host model.Host) {
+			args := s.buildSSHArgs(host, "true")
+			_, err := s.runner.Run(ctx, "ssh", args...)
+			if err == nil {
+				results <- preflightResult{idx: idx, status: model.TransportReady}
+				return
+			}
+			if isAuthError(err) {
+				results <- preflightResult{idx: idx, status: model.TransportAuthRequired, err: err}
+				return
+			}
+			results <- preflightResult{idx: idx, status: model.TransportUnreachable, err: err}
+		}(i, h)
+	}
+
+	for j := 0; j < count; j++ {
+		res := <-results
+		hosts[res.idx].Transport = res.status
+		if res.err != nil {
+			hosts[res.idx].TransportError = res.err.Error()
+		}
+	}
+}
+
+// propagateBlocked marks hosts whose jump dependencies are not ready as TransportBlocked.
+func propagateBlocked(hosts []model.Host) {
+	aliasIndex := make(map[string]int, len(hosts))
+	for i, h := range hosts {
+		aliasIndex[h.Name] = i
+	}
+
+	for i := range hosts {
+		if len(hosts[i].DependsOn) == 0 {
+			continue
+		}
+		var blockers []string
+		for _, dep := range hosts[i].DependsOn {
+			if idx, ok := aliasIndex[dep]; ok {
+				if hosts[idx].Transport != model.TransportReady && hosts[idx].Transport != model.TransportUnknown {
+					blockers = append(blockers, dep)
+				}
+			}
+		}
+		if len(blockers) > 0 {
+			hosts[i].Transport = model.TransportBlocked
+			hosts[i].BlockedBy = blockers
+			hosts[i].TransportError = fmt.Sprintf("blocked by: %s", strings.Join(blockers, ", "))
+		}
+	}
+}
+
+// MultiHopBootstrapCmds returns ordered ControlMaster bootstrap commands for a
+// host and all its unresolved jump dependencies.
+func (s *ProbeService) MultiHopBootstrapCmds(host model.Host, allHosts []model.Host) []string {
+	aliasIndex := make(map[string]int, len(allHosts))
+	for i, h := range allHosts {
+		aliasIndex[h.Name] = i
+	}
+
+	var cmds []string
+
+	// First, generate commands for each hop that needs auth (in order)
+	for _, hop := range host.JumpChain {
+		if hop.External || hop.AliasRef == "" {
+			continue
+		}
+		if idx, ok := aliasIndex[hop.AliasRef]; ok {
+			jumpHost := allHosts[idx]
+			if jumpHost.Transport == model.TransportAuthRequired || jumpHost.Status == model.HostStatusAuthRequired {
+				cmds = append(cmds, s.AuthBootstrapCmd(jumpHost))
+			}
+		}
+	}
+
+	// Then the target host itself if it needs auth
+	if host.Status == model.HostStatusAuthRequired || host.Transport == model.TransportAuthRequired {
+		cmds = append(cmds, s.AuthBootstrapCmd(host))
+	}
+
+	return cmds
 }

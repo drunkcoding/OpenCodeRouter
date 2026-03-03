@@ -158,9 +158,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case keys.Matches(typed.String(), m.keys.Authenticate):
 			host, _, _, ok := m.tree.Selected()
-			if ok && host != nil && host.Status == model.HostStatusAuthRequired {
-				bootstrapCmd := m.getAuthBootstrapCmd(*host)
-				m.modal.OpenAuthBootstrap(host.Name, bootstrapCmd)
+			if ok && host != nil && (host.Status == model.HostStatusAuthRequired || host.Transport == model.TransportBlocked) {
+				bootstrapCmds := m.getMultiHopBootstrapCmds(*host)
+				if len(bootstrapCmds) > 0 {
+					m.modal.OpenAuthBootstrap(host.Name, bootstrapCmds)
+				}
 			}
 		}
 	}
@@ -328,10 +330,10 @@ func maxInt(a, b int) int {
 	return b
 }
 
-func (m *AppModel) getAuthBootstrapCmd(host model.Host) string {
+func (m *AppModel) getMultiHopBootstrapCmds(host model.Host) []string {
 	controlPath := m.cfg.SSH.ControlPath
 	if controlPath == "" {
-		controlPath = "~/.ssh/ocr-%C"
+		controlPath = "~/.ssh/ocr-%n-%C"
 	}
 	persist := m.cfg.SSH.ControlPersist
 	if persist <= 0 {
@@ -341,11 +343,39 @@ func (m *AppModel) getAuthBootstrapCmd(host model.Host) string {
 	if timeout <= 0 {
 		timeout = 10
 	}
-	return fmt.Sprintf(
-		"ssh -o ControlMaster=yes -o ControlPath=%s -o ControlPersist=%d -o ConnectTimeout=%d -Nf %s",
-		controlPath,
-		persist,
-		timeout,
-		host.Name,
-	)
+
+	makeCmd := func(h model.Host) string {
+		return fmt.Sprintf(
+			"ssh -o ControlMaster=yes -o ControlPath=%s -o ControlPersist=%d -o ConnectTimeout=%d -Nf %s",
+			controlPath, persist, timeout, h.Name,
+		)
+	}
+
+	// Build alias index for dependency lookups
+	aliasIndex := make(map[string]int, len(m.hosts))
+	for i, h := range m.hosts {
+		aliasIndex[h.Name] = i
+	}
+
+	var cmds []string
+
+	// Generate commands for each jump hop that needs auth (in chain order)
+	for _, hop := range host.JumpChain {
+		if hop.External || hop.AliasRef == "" {
+			continue
+		}
+		if idx, ok := aliasIndex[hop.AliasRef]; ok {
+			jumpHost := m.hosts[idx]
+			if jumpHost.Transport == model.TransportAuthRequired || jumpHost.Status == model.HostStatusAuthRequired {
+				cmds = append(cmds, makeCmd(jumpHost))
+			}
+		}
+	}
+
+	// Then the target host itself if it needs auth
+	if host.Status == model.HostStatusAuthRequired || host.Transport == model.TransportAuthRequired {
+		cmds = append(cmds, makeCmd(host))
+	}
+
+	return cmds
 }

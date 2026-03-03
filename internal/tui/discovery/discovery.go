@@ -5,12 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"opencoderouter/internal/tui/config"
@@ -115,6 +118,8 @@ func (s *DiscoveryService) Discover(ctx context.Context) ([]model.Host, error) {
 		return hosts[i].Name < hosts[j].Name
 	})
 
+	BuildDependencyGraph(hosts)
+
 	if len(probeErrs) > 0 {
 		return hosts, errors.Join(probeErrs...)
 	}
@@ -168,6 +173,19 @@ func (s *DiscoveryService) resolveHost(ctx context.Context, alias string) (model
 			host.Address = value
 		case "user":
 			host.User = value
+		case "proxyjump":
+			if value != "" && value != "none" {
+				host.ProxyJumpRaw = value
+				host.ProxyKind = model.ProxyKindJump
+				host.JumpChain = parseProxyJump(value)
+			}
+		case "proxycommand":
+			if value != "" && value != "none" {
+				host.ProxyCommand = value
+				if host.ProxyKind == "" || host.ProxyKind == model.ProxyKindNone {
+					host.ProxyKind = model.ProxyKindCommand
+				}
+			}
 		}
 	}
 
@@ -265,4 +283,126 @@ func currentUserName() string {
 		return ""
 	}
 	return u.Username
+}
+
+// parseProxyJump splits a comma-separated ProxyJump value into JumpHop structs.
+// Each hop can be: alias, user@host, host:port, user@host:port, or ssh://user@host:port.
+func parseProxyJump(raw string) []model.JumpHop {
+	parts := strings.Split(raw, ",")
+	hops := make([]model.JumpHop, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		hops = append(hops, parseOneHop(part))
+	}
+	return hops
+}
+
+// parseOneHop parses a single ProxyJump hop string into a JumpHop.
+func parseOneHop(hop string) model.JumpHop {
+	j := model.JumpHop{Raw: hop}
+
+	// Handle ssh:// URI scheme
+	if strings.HasPrefix(hop, "ssh://") {
+		u, err := url.Parse(hop)
+		if err == nil {
+			j.Host = u.Hostname()
+			j.User = u.User.Username()
+			if p := u.Port(); p != "" {
+				j.Port, _ = strconv.Atoi(p)
+			}
+			return j
+		}
+	}
+
+	// Handle user@host:port, user@host, host:port, or bare alias
+	userHost := hop
+	if at := strings.LastIndex(hop, "@"); at >= 0 {
+		j.User = hop[:at]
+		userHost = hop[at+1:]
+	}
+
+	host, portStr, err := net.SplitHostPort(userHost)
+	if err == nil {
+		j.Host = host
+		j.Port, _ = strconv.Atoi(portStr)
+	} else {
+		j.Host = userHost
+	}
+
+	return j
+}
+
+// BuildDependencyGraph populates DependsOn/Dependents/AliasRef fields across hosts.
+// It maps JumpChain hops to known aliases and builds the reverse index.
+func BuildDependencyGraph(hosts []model.Host) {
+	// Build alias lookup
+	aliasIndex := make(map[string]int, len(hosts))
+	addressIndex := make(map[string]int, len(hosts))
+	for i, h := range hosts {
+		aliasIndex[h.Name] = i
+		if h.Address != "" {
+			addressIndex[h.Address] = i
+		}
+	}
+
+	// Resolve hops and build edges
+	for i := range hosts {
+		if hosts[i].ProxyKind != model.ProxyKindJump || len(hosts[i].JumpChain) == 0 {
+			continue
+		}
+
+		seen := make(map[string]bool)
+		for hi := range hosts[i].JumpChain {
+			hop := &hosts[i].JumpChain[hi]
+			alias := resolveHopAlias(hop.Host, aliasIndex, addressIndex)
+			if alias == "" {
+				hop.External = true
+				continue
+			}
+			hop.AliasRef = alias
+			if !seen[alias] {
+				seen[alias] = true
+				hosts[i].DependsOn = append(hosts[i].DependsOn, alias)
+			}
+		}
+	}
+
+	// Build reverse index (Dependents)
+	for i := range hosts {
+		for _, dep := range hosts[i].DependsOn {
+			if idx, ok := aliasIndex[dep]; ok {
+				hosts[idx].Dependents = appendUnique(hosts[idx].Dependents, hosts[i].Name)
+			}
+		}
+	}
+}
+
+// resolveHopAlias tries to match a hop host to a known SSH alias.
+func resolveHopAlias(hopHost string, aliasIndex, addressIndex map[string]int) string {
+	// Direct alias match
+	if _, ok := aliasIndex[hopHost]; ok {
+		return hopHost
+	}
+	// Address match (hostname resolved)
+	if idx, ok := addressIndex[hopHost]; ok {
+		for alias, i := range aliasIndex {
+			if i == idx {
+				return alias
+			}
+		}
+	}
+	return ""
+}
+
+// appendUnique appends s to slice only if not already present.
+func appendUnique(slice []string, s string) []string {
+	for _, v := range slice {
+		if v == s {
+			return slice
+		}
+	}
+	return append(slice, s)
 }

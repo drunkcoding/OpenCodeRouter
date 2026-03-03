@@ -30,3 +30,10 @@ type SSHErrorMsg struct {
 type SearchChangedMsg struct {
 	Query string
 }
+
+
+// TransportPreflightMsg is emitted after transport preflight probing completes.
+type TransportPreflightMsg struct {
+	Hosts []Host
+	Err   error
+}

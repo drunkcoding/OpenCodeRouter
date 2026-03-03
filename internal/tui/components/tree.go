@@ -225,7 +225,34 @@ func (t SessionTreeView) renderRow(row treeRow, selected bool) string {
 		if status == "" {
 			status = string(model.HostStatusUnknown)
 		}
-		line = fmt.Sprintf("%s %s [%s]", glyph, h.Label, status)
+
+		// Build proxy badge suffix
+		var suffix string
+		if len(h.Dependents) > 0 {
+			suffix += fmt.Sprintf(" [jump for %d]", len(h.Dependents))
+		}
+		if h.Transport == model.TransportBlocked {
+			status = "blocked"
+			if len(h.BlockedBy) > 0 {
+				suffix += fmt.Sprintf(" (via %s)", strings.Join(h.BlockedBy, " → "))
+			}
+		} else if h.ProxyKind == model.ProxyKindJump && h.ProxyJumpRaw != "" {
+			var hops []string
+			for _, hop := range h.JumpChain {
+				if hop.AliasRef != "" {
+					hops = append(hops, hop.AliasRef)
+				} else {
+					hops = append(hops, hop.Host)
+				}
+			}
+			if len(hops) > 0 {
+				suffix += fmt.Sprintf(" via %s", strings.Join(hops, " → "))
+			}
+		} else if h.ProxyKind == model.ProxyKindCommand {
+			suffix += " via ProxyCommand"
+		}
+
+		line = fmt.Sprintf("%s %s [%s]%s", glyph, h.Label, status, suffix)
 		line = t.theme.TreeHost.Render(line)
 	case treeNodeProject:
 		p := h.Projects[row.projectIdx]

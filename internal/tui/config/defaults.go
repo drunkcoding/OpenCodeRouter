@@ -47,7 +47,7 @@ func DefaultConfig() Config {
 		SSH: SSHConfig{
 			ControlMaster:  "auto",
 			ControlPersist: 60,
-			ControlPath:    "~/.ssh/ocr-%C",
+			ControlPath:    "~/.ssh/ocr-%n-%C",
 			BatchMode:      true,
 			ConnectTimeout: 10,
 		},
