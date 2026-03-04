@@ -374,18 +374,21 @@ make build
 
 | Key | Action |
 |---|---|
-| `Enter` | Attach to selected session |
-| `/` | Focus search |
-| `n` | New session on selected host |
-| `i` | Inspect session details |
-| `d` | Kill/archive session |
-| `r` | Refresh all hosts |
-| `Tab` | Cycle view mode |
-| `↑/↓` | Navigate |
-| `←/→` | Collapse/expand tree nodes |
-| `Space` | Toggle selection |
-| `Esc` | Close panel/modal |
-| `q` | Quit |
+| `Enter` | If a session row is selected, attach to that session. On host or project rows, expand or collapse the node. |
+| `Space` | Expand or collapse the selected host or project node, same as Enter on non-session rows. |
+| `↑/↓` or `k/j` | Move selection up or down in the tree. |
+| `←/→` or `h/l` | Collapse or expand tree nodes. |
+| `/` | Focus search input. |
+| `r` | Refresh all hosts and sessions. |
+| `n` | Open "new session" prompt for the selected host or project. |
+| `d` | Kill or archive the selected session. |
+| `g` | Clone a git repository on the selected host and start OpenCode in the clone. |
+| `i` | Show the inspect panel for the selected session. |
+| `Tab` | Toggle the inspect panel on or off. |
+| `a` | Show SSH auth bootstrap commands for an auth-required or blocked host. |
+| `e` | Open details for the last error when an error toast is visible. |
+| `Esc` | Close the active modal or error dialog. |
+| `q` | Quit the TUI. |
 
 ### Configuration
 
@@ -428,10 +431,17 @@ sessions:
   enrich_from_db: true   # Query SQLite for message counts, agents
 
 keybindings:
-  attach: enter
+  attach: enter         # Attach to selected session
   search: /
   refresh: r
   quit: q
+  new_session: n        # New session on selected host or project
+  kill_session: d
+  git_clone: g
+  inspect: i
+  cycle_view: tab       # Toggle inspect panel
+  authenticate: a
+  error_detail: e       # Open last error details when an error toast is shown
 ```
 
 ### How probing works
