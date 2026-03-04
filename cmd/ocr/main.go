@@ -51,7 +51,7 @@ func newRootCmd() *cobra.Command {
 				defer closeLogFile()
 			}
 			if logger != nil {
-				logger.Info("ocr logger initialized", "debug", debug)
+				logger.Info("ocr logger initialized", "debug", debug, "log_file", logFile)
 			}
 
 			app := tui.NewApp(cfg, nil, nil, logger)
@@ -71,16 +71,12 @@ func newRootCmd() *cobra.Command {
 }
 
 func buildLogger(debug bool, logFile string) (*slog.Logger, func(), error) {
-	if debug && logFile == "" {
+	if logFile == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve home dir for default log file: %w", err)
 		}
 		logFile = filepath.Join(home, ".ocr", "ocr.log")
-	}
-
-	if !debug && logFile == "" {
-		return nil, nil, nil
 	}
 
 	if err := os.MkdirAll(filepath.Dir(logFile), 0o750); err != nil {
@@ -104,5 +100,6 @@ func buildLogger(debug bool, logFile string) (*slog.Logger, func(), error) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(file, &slog.HandlerOptions{Level: level}))
+	slog.SetDefault(logger)
 	return logger, closeFn, nil
 }
