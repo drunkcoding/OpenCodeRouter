@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"opencoderouter/internal/tui/model"
 	"opencoderouter/internal/tui/theme"
 
 	textinput "charm.land/bubbles/v2/textinput"
@@ -15,15 +16,12 @@ import (
 type ModalType string
 
 const (
-	// ModalTypeNone means no active modal.
-	ModalTypeNone ModalType = "none"
-	// ModalTypeNewSession prompts for session creation fields.
-	ModalTypeNewSession ModalType = "new_session"
-	// ModalTypeConfirmKill prompts for kill confirmation.
-	ModalTypeConfirmKill ModalType = "confirm_kill"
-	// ModalTypeErrorDetail displays detailed errors.
-	ModalTypeErrorDetail ModalType = "error_detail"
-	// ModalTypeAuthBootstrap shows SSH ControlMaster bootstrap command.
+	ModalTypeNone          ModalType = "none"
+	ModalTypeNewSession    ModalType = "new_session"
+	ModalTypeNewDirectory  ModalType = "new_directory"
+	ModalTypeGitClone      ModalType = "git_clone"
+	ModalTypeConfirmKill   ModalType = "confirm_kill"
+	ModalTypeErrorDetail   ModalType = "error_detail"
 	ModalTypeAuthBootstrap ModalType = "auth_bootstrap"
 )
 
@@ -38,6 +36,10 @@ type ModalLayer struct {
 	width       int
 	height      int
 	theme       theme.Theme
+
+	hostName  string
+	directory string
+	sessionID string
 }
 
 // NewModalLayer creates an empty modal manager.
@@ -65,24 +67,58 @@ func (m ModalLayer) Type() ModalType {
 	return m.modalType
 }
 
-// OpenNewSession opens the create-session modal.
-func (m *ModalLayer) OpenNewSession() {
+// OpenNewSession opens a confirmation modal to create a session in an existing project.
+func (m *ModalLayer) OpenNewSession(hostName, projectName, directory string) {
 	m.active = true
 	m.modalType = ModalTypeNewSession
 	m.title = "Create Session"
-	m.body = "Provide a title and press enter to submit."
+	m.body = fmt.Sprintf("Create a new session on %s in %s?\n%s", hostName, projectName, directory)
 	m.confirmText = "Enter create • Esc cancel"
+	m.hostName = hostName
+	m.directory = directory
+	m.input.Blur()
+}
+
+// OpenNewDirectory opens a modal to enter a directory path for session creation.
+func (m *ModalLayer) OpenNewDirectory(hostName string) {
+	m.active = true
+	m.modalType = ModalTypeNewDirectory
+	m.title = "New Session — Custom Directory"
+	m.body = fmt.Sprintf("Enter directory path on %s:", hostName)
+	m.confirmText = "Enter create • Esc cancel"
+	m.hostName = hostName
+	m.directory = ""
+	m.input.Prompt = "dir> "
+	m.input.Placeholder = "/path/to/project"
+	m.input.SetValue("")
+	m.input.Focus()
+}
+
+// OpenGitClone opens a modal to enter a git repo URL for cloning + session creation.
+func (m *ModalLayer) OpenGitClone(hostName string) {
+	m.active = true
+	m.modalType = ModalTypeGitClone
+	m.title = "Clone & Create Session"
+	m.body = fmt.Sprintf("Enter git repository URL to clone on %s:", hostName)
+	m.confirmText = "Enter clone • Esc cancel"
+	m.hostName = hostName
+	m.directory = ""
+	m.input.Prompt = "url> "
+	m.input.Placeholder = "https://github.com/org/repo.git"
 	m.input.SetValue("")
 	m.input.Focus()
 }
 
 // OpenConfirmKill opens a destructive confirmation modal.
-func (m *ModalLayer) OpenConfirmKill(sessionID string) {
+func (m *ModalLayer) OpenConfirmKill(hostName, sessionID, directory string) {
 	m.active = true
 	m.modalType = ModalTypeConfirmKill
 	m.title = "Kill Session"
-	m.body = fmt.Sprintf("Kill session %s?", sessionID)
+	m.body = fmt.Sprintf("Kill session %s on %s?", sessionID, hostName)
 	m.confirmText = "y confirm • n cancel"
+	m.hostName = hostName
+	m.sessionID = sessionID
+	m.directory = directory
 	m.input.Blur()
 }
 
@@ -141,6 +177,9 @@ func (m *ModalLayer) Close() {
 	m.title = ""
 	m.body = ""
 	m.confirmText = ""
+	m.hostName = ""
+	m.directory = ""
+	m.sessionID = ""
 	m.input.Blur()
 }
 
@@ -155,7 +194,28 @@ func (m ModalLayer) Update(msg tea.Msg) (ModalLayer, tea.Cmd) {
 		return m, nil
 	}
 
-	if m.modalType == ModalTypeNewSession {
+	switch m.modalType {
+	case ModalTypeNewSession:
+		if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
+			switch keyMsg.String() {
+			case "esc":
+				m.Close()
+				return m, nil
+			case "enter":
+				hostName := m.hostName
+				directory := m.directory
+				m.Close()
+				return m, func() tea.Msg {
+					return model.ModalConfirmCreateMsg{
+						HostName:  hostName,
+						Directory: directory,
+					}
+				}
+			}
+		}
+		return m, nil
+
+	case ModalTypeNewDirectory:
 		input, cmd := m.input.Update(msg)
 		m.input = input
 		if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
@@ -164,25 +224,69 @@ func (m ModalLayer) Update(msg tea.Msg) (ModalLayer, tea.Cmd) {
 				m.Close()
 				return m, nil
 			case "enter":
-				// TODO: dispatch create-session command through service layer.
+				dir := strings.TrimSpace(m.input.Value())
+				if dir == "" {
+					return m, cmd
+				}
+				hostName := m.hostName
 				m.Close()
-				return m, nil
+				return m, func() tea.Msg {
+					return model.ModalConfirmNewDirMsg{
+						HostName:  hostName,
+						Directory: dir,
+					}
+				}
 			}
 		}
 		return m, cmd
-	}
 
-	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
-		switch m.modalType {
-		case ModalTypeConfirmKill:
+	case ModalTypeGitClone:
+		input, cmd := m.input.Update(msg)
+		m.input = input
+		if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
+			switch keyMsg.String() {
+			case "esc":
+				m.Close()
+				return m, nil
+			case "enter":
+				gitURL := strings.TrimSpace(m.input.Value())
+				if gitURL == "" {
+					return m, cmd
+				}
+				hostName := m.hostName
+				m.Close()
+				return m, func() tea.Msg {
+					return model.ModalConfirmGitCloneMsg{
+						HostName: hostName,
+						GitURL:   gitURL,
+					}
+				}
+			}
+		}
+		return m, cmd
+
+	case ModalTypeConfirmKill:
+		if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
 			switch keyMsg.String() {
 			case "y":
-				// TODO: dispatch kill-session command through service layer.
+				hostName := m.hostName
+				sessionID := m.sessionID
+				directory := m.directory
 				m.Close()
+				return m, func() tea.Msg {
+					return model.ModalConfirmKillMsg{
+						HostName:  hostName,
+						SessionID: sessionID,
+						Directory: directory,
+					}
+				}
 			case "n", "esc":
 				m.Close()
 			}
-		case ModalTypeErrorDetail, ModalTypeAuthBootstrap:
+		}
+
+	case ModalTypeErrorDetail, ModalTypeAuthBootstrap:
+		if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
 			if keyMsg.String() == "esc" || keyMsg.String() == "enter" {
 				m.Close()
 			}
@@ -202,7 +306,7 @@ func (m ModalLayer) View() string {
 		m.theme.ModalTitle.Render(m.title),
 		m.theme.ModalBody.Render(m.body),
 	}
-	if m.modalType == ModalTypeNewSession {
+	if m.modalType == ModalTypeNewDirectory || m.modalType == ModalTypeGitClone {
 		contentLines = append(contentLines, "", m.input.View())
 	}
 	if m.confirmText != "" {

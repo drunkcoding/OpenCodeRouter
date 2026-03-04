@@ -65,6 +65,7 @@ func DefaultConfig() Config {
 			Quit:         "q",
 			NewSession:   "n",
 			KillSession:  "d",
+			GitClone:     "g",
 			Inspect:      "i",
 			CycleView:    "tab",
 			Authenticate: "a",

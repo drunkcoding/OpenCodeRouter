@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path"
+	"strings"
 	"time"
 
 	"opencoderouter/internal/tui/components"
@@ -137,6 +139,50 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, m.refreshCmd())
 
+	case model.ModalConfirmCreateMsg:
+		if host := m.findHostByName(typed.HostName); host != nil {
+			cmds = append(cmds, m.createSessionCmd(*host, typed.Directory))
+		}
+
+	case model.ModalConfirmNewDirMsg:
+		if host := m.findHostByName(typed.HostName); host != nil {
+			cmds = append(cmds, m.createSessionCmd(*host, typed.Directory))
+		}
+
+	case model.ModalConfirmGitCloneMsg:
+		if host := m.findHostByName(typed.HostName); host != nil {
+			cmds = append(cmds, m.gitCloneSessionCmd(*host, typed.GitURL))
+		}
+
+	case model.ModalConfirmKillMsg:
+		if host := m.findHostByName(typed.HostName); host != nil {
+			cmds = append(cmds, m.killSessionCmd(*host, typed.SessionID, typed.Directory))
+		}
+
+	case model.CreateSessionFinishedMsg:
+		if typed.Err != nil {
+			if toastCmd := m.showErrorToast(typed.Err); toastCmd != nil {
+				cmds = append(cmds, toastCmd)
+			}
+		}
+		cmds = append(cmds, m.refreshCmd())
+
+	case model.KillSessionFinishedMsg:
+		if typed.Err != nil {
+			if toastCmd := m.showErrorToast(typed.Err); toastCmd != nil {
+				cmds = append(cmds, toastCmd)
+			}
+		}
+		cmds = append(cmds, m.refreshCmd())
+
+	case model.GitCloneFinishedMsg:
+		if typed.Err != nil {
+			if toastCmd := m.showErrorToast(typed.Err); toastCmd != nil {
+				cmds = append(cmds, toastCmd)
+			}
+		}
+		cmds = append(cmds, m.refreshCmd())
+
 	case tea.KeyPressMsg:
 		if m.modal.Active() {
 			var modalCmd tea.Cmd
@@ -156,10 +202,22 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case keys.Matches(typed.String(), m.keys.Search):
 			m.header.FocusSearch()
 		case keys.Matches(typed.String(), m.keys.NewSession):
-			m.modal.OpenNewSession()
+			host, project, _, ok := m.tree.Selected()
+			if ok && host != nil && host.Status == model.HostStatusOnline {
+				if project != nil && len(project.Sessions) > 0 {
+					m.modal.OpenNewSession(host.Name, project.Name, project.Sessions[0].Directory)
+				} else {
+					m.modal.OpenNewDirectory(host.Name)
+				}
+			}
 		case keys.Matches(typed.String(), m.keys.KillSession):
-			if _, _, session, ok := m.tree.Selected(); ok && session != nil {
-				m.modal.OpenConfirmKill(session.ID)
+			if host, _, session, ok := m.tree.Selected(); ok && host != nil && session != nil {
+				m.modal.OpenConfirmKill(host.Name, session.ID, session.Directory)
+			}
+		case keys.Matches(typed.String(), m.keys.GitClone):
+			host, _, _, ok := m.tree.Selected()
+			if ok && host != nil && host.Status == model.HostStatusOnline {
+				m.modal.OpenGitClone(host.Name)
 			}
 		case keys.Matches(typed.String(), m.keys.CycleView):
 			m.showInspect = !m.showInspect
@@ -466,4 +524,71 @@ func (m *AppModel) syncFooterContext() {
 		SearchFocus:       m.header.SearchFocused(),
 		ErrorDetailActive: m.toast.Visible() && m.lastError != nil,
 	})
+}
+
+func (m *AppModel) createSessionCmd(host model.Host, directory string) tea.Cmd {
+	bin := host.OpencodeBin
+	if bin == "" {
+		bin = "opencode"
+	}
+
+	remoteCmd := fmt.Sprintf(
+		`OC=$(command -v %s 2>/dev/null || echo "$HOME/.opencode/bin/%s"); cd %s && exec "$OC"`,
+		bin, bin, directory,
+	)
+
+	c := exec.Command("ssh", "-t", host.Name, remoteCmd)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return model.CreateSessionFinishedMsg{Err: err}
+	})
+}
+
+func (m *AppModel) killSessionCmd(host model.Host, sessionID, directory string) tea.Cmd {
+	bin := host.OpencodeBin
+	if bin == "" {
+		bin = "opencode"
+	}
+
+	remoteCmd := fmt.Sprintf(
+		`OC=$(command -v %s 2>/dev/null || echo "$HOME/.opencode/bin/%s"); cd %s && "$OC" session archive %s`,
+		bin, bin, directory, sessionID,
+	)
+
+	return func() tea.Msg {
+		c := exec.Command("ssh", host.Name, remoteCmd)
+		err := c.Run()
+		return model.KillSessionFinishedMsg{Err: err}
+	}
+}
+
+func (m *AppModel) gitCloneSessionCmd(host model.Host, gitURL string) tea.Cmd {
+	bin := host.OpencodeBin
+	if bin == "" {
+		bin = "opencode"
+	}
+
+	repoDir := repoNameFromURL(gitURL)
+	remoteCmd := fmt.Sprintf(
+		`git clone %s %s && OC=$(command -v %s 2>/dev/null || echo "$HOME/.opencode/bin/%s"); cd %s && exec "$OC"`,
+		gitURL, repoDir, bin, bin, repoDir,
+	)
+
+	c := exec.Command("ssh", "-t", host.Name, remoteCmd)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return model.GitCloneFinishedMsg{Err: err}
+	})
+}
+
+func (m *AppModel) findHostByName(name string) *model.Host {
+	for i := range m.hosts {
+		if m.hosts[i].Name == name {
+			return &m.hosts[i]
+		}
+	}
+	return nil
+}
+
+func repoNameFromURL(gitURL string) string {
+	base := path.Base(gitURL)
+	return strings.TrimSuffix(base, ".git")
 }

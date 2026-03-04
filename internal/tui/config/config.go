@@ -88,6 +88,7 @@ type KeybindingsConfig struct {
 	Quit         string `mapstructure:"quit" yaml:"quit"`
 	NewSession   string `mapstructure:"new_session" yaml:"new_session"`
 	KillSession  string `mapstructure:"kill_session" yaml:"kill_session"`
+	GitClone     string `mapstructure:"git_clone" yaml:"git_clone"`
 	Inspect      string `mapstructure:"inspect" yaml:"inspect"`
 	CycleView    string `mapstructure:"cycle_view" yaml:"cycle_view"`
 	Authenticate string `mapstructure:"authenticate" yaml:"authenticate"`

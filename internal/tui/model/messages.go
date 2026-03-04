@@ -44,3 +44,46 @@ type AttachFinishedMsg struct {
 type ToastExpiredMsg struct {
 	Token uint64
 }
+
+// ModalConfirmCreateMsg is emitted when the user confirms session creation
+// in an existing project directory.
+type ModalConfirmCreateMsg struct {
+	HostName  string
+	Directory string
+}
+
+// ModalConfirmNewDirMsg is emitted when the user confirms session creation
+// in a user-supplied directory path.
+type ModalConfirmNewDirMsg struct {
+	HostName  string
+	Directory string
+}
+
+// ModalConfirmGitCloneMsg is emitted when the user confirms git clone
+// and session creation on a remote host.
+type ModalConfirmGitCloneMsg struct {
+	HostName string
+	GitURL   string
+}
+
+// ModalConfirmKillMsg is emitted when the user confirms session kill/archive.
+type ModalConfirmKillMsg struct {
+	HostName  string
+	SessionID string
+	Directory string
+}
+
+// CreateSessionFinishedMsg is returned when interactive SSH session creation exits.
+type CreateSessionFinishedMsg struct {
+	Err error
+}
+
+// KillSessionFinishedMsg is returned when background SSH session kill completes.
+type KillSessionFinishedMsg struct {
+	Err error
+}
+
+// GitCloneFinishedMsg is returned when interactive SSH git clone + session exits.
+type GitCloneFinishedMsg struct {
+	Err error
+}

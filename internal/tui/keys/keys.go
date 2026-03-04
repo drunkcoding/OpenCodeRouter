@@ -21,6 +21,7 @@ type KeyMap struct {
 	Quit         Binding
 	NewSession   Binding
 	KillSession  Binding
+	GitClone     Binding
 	Inspect      Binding
 	CycleView    Binding
 	Authenticate Binding
@@ -42,6 +43,7 @@ func NewKeyMap(cfg config.KeybindingsConfig) KeyMap {
 	quit := firstNonEmpty(cfg.Quit, "q")
 	newSession := firstNonEmpty(cfg.NewSession, "n")
 	killSession := firstNonEmpty(cfg.KillSession, "d")
+	gitClone := firstNonEmpty(cfg.GitClone, "g")
 	inspect := firstNonEmpty(cfg.Inspect, "i")
 	cycleView := firstNonEmpty(cfg.CycleView, "tab")
 	authenticate := firstNonEmpty(cfg.Authenticate, "a")
@@ -54,6 +56,7 @@ func NewKeyMap(cfg config.KeybindingsConfig) KeyMap {
 		Quit:         Binding{Key: quit, Description: "quit"},
 		NewSession:   Binding{Key: newSession, Description: "new"},
 		KillSession:  Binding{Key: killSession, Description: "kill"},
+		GitClone:     Binding{Key: gitClone, Description: "clone"},
 		Inspect:      Binding{Key: inspect, Description: "inspect"},
 		CycleView:    Binding{Key: cycleView, Description: "cycle"},
 		Authenticate: Binding{Key: authenticate, Description: "auth"},
@@ -74,7 +77,7 @@ func Matches(pressed string, binding Binding) bool {
 
 // ShortHelp returns compact bindings suitable for footer rendering.
 func (k KeyMap) ShortHelp() []Binding {
-	return []Binding{k.Search, k.Refresh, k.Authenticate, k.NewSession, k.Attach, k.Quit}
+	return []Binding{k.Search, k.Refresh, k.Authenticate, k.NewSession, k.GitClone, k.Attach, k.Quit}
 }
 
 // FullHelp returns grouped bindings for expanded help views.
@@ -82,7 +85,7 @@ func (k KeyMap) FullHelp() [][]Binding {
 	return [][]Binding{
 		{k.Search, k.Refresh, k.CycleView, k.Quit},
 		{k.Up, k.Down, k.Toggle, k.Attach, k.Inspect},
-		{k.NewSession, k.KillSession, k.Authenticate, k.ErrorDetail, k.Collapse, k.Expand, k.Close},
+		{k.NewSession, k.KillSession, k.GitClone, k.Authenticate, k.ErrorDetail, k.Collapse, k.Expand, k.Close},
 	}
 }
 
