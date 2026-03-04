@@ -931,7 +931,7 @@ func (m *AppModel) killSessionCmd(host model.Host, sessionID, directory string) 
 	)
 
 	return func() tea.Msg {
-		c := exec.Command("ssh", host.Name, remoteCmd)
+		c := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-t", host.Name, remoteCmd)
 		err := c.Run()
 		return model.KillSessionFinishedMsg{Err: err}
 	}
