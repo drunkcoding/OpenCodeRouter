@@ -45,7 +45,7 @@ type SessionTerminal struct {
 	closeOnce sync.Once
 }
 
-func NewSessionTerminal(host model.Host, session model.Session, width, height int, sendMsg func(tea.Msg), logger *slog.Logger) (*SessionTerminal, error) {
+func NewSessionTerminal(host model.Host, session model.Session, width, height int, sendMsg func(tea.Msg), logger *slog.Logger, sshOpts []string) (*SessionTerminal, error) {
 	if host.Name == "" {
 		return nil, errors.New("host name is required")
 	}
@@ -69,7 +69,7 @@ func NewSessionTerminal(host model.Host, session model.Session, width, height in
 	logger.Debug("terminal pty allocated", "session_id", session.ID)
 
 	remoteCmd := buildAttachRemoteCommand(host, session)
-	cmd := exec.Command("ssh", buildAttachSSHArgs(host, remoteCmd)...)
+	cmd := exec.Command("ssh", buildAttachSSHArgs(host, remoteCmd, sshOpts)...)
 	logger.Debug("terminal ssh command", "session_id", session.ID, "args", cmd.Args)
 
 	// Set controlling terminal so SSH can properly allocate a remote PTY.
@@ -308,8 +308,11 @@ func buildAttachRemoteCommand(host model.Host, session model.Session) string {
 	)
 }
 
-func buildAttachSSHArgs(host model.Host, remoteCmd string) []string {
-	return []string{"-o", attachSSHBatchMode, "-o", attachSSHTimeout, "-t", "-t", host.Name, remoteCmd}
+func buildAttachSSHArgs(host model.Host, remoteCmd string, sshOpts []string) []string {
+	args := []string{"-o", attachSSHBatchMode, "-o", attachSSHTimeout}
+	args = append(args, sshOpts...)
+	args = append(args, "-t", "-t", host.Name, remoteCmd)
+	return args
 }
 
 func isPTYClosureError(err error) bool {

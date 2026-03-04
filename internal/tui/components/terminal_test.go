@@ -150,7 +150,7 @@ func TestSessionTerminalCreationWithMockSubprocess(t *testing.T) {
 	host := setupMockSSHEnvironment(t)
 	msgs := make(chan tea.Msg, 64)
 
-	terminal, err := NewSessionTerminal(host, newTestSession("long"), 80, 24, func(msg tea.Msg) { msgs <- msg }, slog.Default())
+	terminal, err := NewSessionTerminal(host, newTestSession("long"), 80, 24, func(msg tea.Msg) { msgs <- msg }, slog.Default(), nil)
 	if err != nil {
 		t.Fatalf("NewSessionTerminal: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestSessionTerminalCreationWithMockSubprocess(t *testing.T) {
 
 func TestSessionTerminalViewNonEmptyAfterOutput(t *testing.T) {
 	host := setupMockSSHEnvironment(t)
-	terminal, err := NewSessionTerminal(host, newTestSession("view"), 80, 24, nil, slog.Default())
+	terminal, err := NewSessionTerminal(host, newTestSession("view"), 80, 24, nil, slog.Default(), nil)
 	if err != nil {
 		t.Fatalf("NewSessionTerminal: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestSessionTerminalViewNonEmptyAfterOutput(t *testing.T) {
 
 func TestSessionTerminalWriteInputPath(t *testing.T) {
 	host := setupMockSSHEnvironment(t)
-	terminal, err := NewSessionTerminal(host, newTestSession("write"), 80, 24, nil, slog.Default())
+	terminal, err := NewSessionTerminal(host, newTestSession("write"), 80, 24, nil, slog.Default(), nil)
 	if err != nil {
 		t.Fatalf("NewSessionTerminal: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestSessionTerminalCloseAndIsClosed(t *testing.T) {
 	host := setupMockSSHEnvironment(t)
 	msgs := make(chan tea.Msg, 64)
 
-	terminal, err := NewSessionTerminal(host, newTestSession("long"), 80, 24, func(msg tea.Msg) { msgs <- msg }, slog.Default())
+	terminal, err := NewSessionTerminal(host, newTestSession("long"), 80, 24, func(msg tea.Msg) { msgs <- msg }, slog.Default(), nil)
 	if err != nil {
 		t.Fatalf("NewSessionTerminal: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestSessionTerminalCloseAndIsClosed(t *testing.T) {
 
 func TestSessionTerminalResizeUpdatesDimensions(t *testing.T) {
 	host := setupMockSSHEnvironment(t)
-	terminal, err := NewSessionTerminal(host, newTestSession("long"), 80, 24, nil, slog.Default())
+	terminal, err := NewSessionTerminal(host, newTestSession("long"), 80, 24, nil, slog.Default(), nil)
 	if err != nil {
 		t.Fatalf("NewSessionTerminal: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestSessionTerminalGracefulSubprocessExit(t *testing.T) {
 	host := setupMockSSHEnvironment(t)
 	msgs := make(chan tea.Msg, 64)
 
-	terminal, err := NewSessionTerminal(host, newTestSession("graceful"), 80, 24, func(msg tea.Msg) { msgs <- msg }, slog.Default())
+	terminal, err := NewSessionTerminal(host, newTestSession("graceful"), 80, 24, func(msg tea.Msg) { msgs <- msg }, slog.Default(), nil)
 	if err != nil {
 		t.Fatalf("NewSessionTerminal: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestSessionTerminalCrashExitSetsErr(t *testing.T) {
 	host := setupMockSSHEnvironment(t)
 	msgs := make(chan tea.Msg, 64)
 
-	terminal, err := NewSessionTerminal(host, newTestSession("crash"), 80, 24, func(msg tea.Msg) { msgs <- msg }, slog.Default())
+	terminal, err := NewSessionTerminal(host, newTestSession("crash"), 80, 24, func(msg tea.Msg) { msgs <- msg }, slog.Default(), nil)
 	if err != nil {
 		t.Fatalf("NewSessionTerminal: %v", err)
 	}
@@ -304,11 +304,11 @@ func TestSessionTerminalCrashExitSetsErr(t *testing.T) {
 func TestSessionTerminalConstructorValidation(t *testing.T) {
 	host := setupMockSSHEnvironment(t)
 
-	if _, err := NewSessionTerminal(model.Host{}, newTestSession("x"), 80, 24, nil, slog.Default()); err == nil {
+	if _, err := NewSessionTerminal(model.Host{}, newTestSession("x"), 80, 24, nil, slog.Default(), nil); err == nil {
 		t.Fatal("expected error when host name is empty")
 	}
 
-	if _, err := NewSessionTerminal(host, model.Session{}, 80, 24, nil, slog.Default()); err == nil {
+	if _, err := NewSessionTerminal(host, model.Session{}, 80, 24, nil, slog.Default(), nil); err == nil {
 		t.Fatal("expected error when session id is empty")
 	}
 }
@@ -320,7 +320,7 @@ func TestSessionTerminalViewAndResizeGuards(t *testing.T) {
 	}
 
 	host := setupMockSSHEnvironment(t)
-	terminal, err := NewSessionTerminal(host, newTestSession("long"), 80, 24, nil, slog.Default())
+	terminal, err := NewSessionTerminal(host, newTestSession("long"), 80, 24, nil, slog.Default(), nil)
 	if err != nil {
 		t.Fatalf("NewSessionTerminal: %v", err)
 	}
@@ -353,7 +353,7 @@ func TestSessionTerminalHelperFunctions(t *testing.T) {
 		t.Fatalf("command with directory missing expected segments: %q", cmdWithDir)
 	}
 
-	attachArgs := buildAttachSSHArgs(model.Host{Name: "dev-1"}, "echo hi")
+	attachArgs := buildAttachSSHArgs(model.Host{Name: "dev-1"}, "echo hi", nil)
 	wantAttachArgs := []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-t", "-t", "dev-1", "echo hi"}
 	if !reflect.DeepEqual(attachArgs, wantAttachArgs) {
 		t.Fatalf("attach ssh args = %v, want %v", attachArgs, wantAttachArgs)

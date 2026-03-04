@@ -123,7 +123,7 @@ func NewApp(cfg config.Config, discoverer Discoverer, proberSvc Prober, logger *
 		spinner:        components.NewBrailleSpinner(cfg.Display.Animation),
 		showInspect:    true,
 		activeView:     viewTree,
-		sessionManager: session.NewManager(nil, logger),
+		sessionManager: session.NewManager(nil, logger, buildSSHControlOpts(cfg.SSH)),
 	}
 	app.tree.SetActiveSessionLookup(func(sessionID string) bool {
 		if strings.TrimSpace(sessionID) == "" {
@@ -149,12 +149,13 @@ func (m *AppModel) SetProgram(p *tea.Program) {
 		m.sessionManager.Shutdown()
 	}
 
+	sshOpts := buildSSHControlOpts(m.cfg.SSH)
 	if p == nil {
-		m.sessionManager = session.NewManager(nil, m.logger)
+		m.sessionManager = session.NewManager(nil, m.logger, sshOpts)
 		return
 	}
 
-	m.sessionManager = session.NewManager(p.Send, m.logger)
+	m.sessionManager = session.NewManager(p.Send, m.logger, sshOpts)
 }
 
 // Init starts animation and the first refresh cycle.
@@ -716,13 +717,28 @@ func (m *AppModel) ensureSessionManager() terminalSessionManager {
 		return m.sessionManager
 	}
 
+	sshOpts := buildSSHControlOpts(m.cfg.SSH)
 	if m.program != nil {
-		m.sessionManager = session.NewManager(m.program.Send, m.logger)
+		m.sessionManager = session.NewManager(m.program.Send, m.logger, sshOpts)
 	} else {
-		m.sessionManager = session.NewManager(nil, m.logger)
+		m.sessionManager = session.NewManager(nil, m.logger, sshOpts)
 	}
 
 	return m.sessionManager
+}
+
+func buildSSHControlOpts(ssh config.SSHConfig) []string {
+	var opts []string
+	if ssh.ControlMaster != "" {
+		opts = append(opts, "-o", "ControlMaster="+ssh.ControlMaster)
+	}
+	if ssh.ControlPersist > 0 {
+		opts = append(opts, "-o", fmt.Sprintf("ControlPersist=%d", ssh.ControlPersist))
+	}
+	if ssh.ControlPath != "" {
+		opts = append(opts, "-o", "ControlPath="+ssh.ControlPath)
+	}
+	return opts
 }
 
 func (m *AppModel) activeTerminal() session.Terminal {

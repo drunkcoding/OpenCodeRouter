@@ -21,7 +21,7 @@ type Terminal interface {
 	Err() error
 }
 
-type terminalFactory func(host model.Host, session model.Session, width, height int, sendMsg func(tea.Msg), logger *slog.Logger) (Terminal, error)
+type terminalFactory func(host model.Host, session model.Session, width, height int, sendMsg func(tea.Msg), logger *slog.Logger, sshOpts []string) (Terminal, error)
 
 type Manager struct {
 	mu          sync.RWMutex
@@ -29,9 +29,10 @@ type Manager struct {
 	sendMsg     func(tea.Msg)
 	newTerminal terminalFactory
 	logger      *slog.Logger
+	sshOpts     []string
 }
 
-func NewManager(sendMsg func(tea.Msg), logger *slog.Logger) *Manager {
+func NewManager(sendMsg func(tea.Msg), logger *slog.Logger, sshOpts []string) *Manager {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -40,11 +41,12 @@ func NewManager(sendMsg func(tea.Msg), logger *slog.Logger) *Manager {
 		sendMsg:     sendMsg,
 		newTerminal: defaultTerminalFactory,
 		logger:      logger,
+		sshOpts:     sshOpts,
 	}
 }
 
-func defaultTerminalFactory(host model.Host, session model.Session, width, height int, sendMsg func(tea.Msg), logger *slog.Logger) (Terminal, error) {
-	return components.NewSessionTerminal(host, session, width, height, sendMsg, logger)
+func defaultTerminalFactory(host model.Host, session model.Session, width, height int, sendMsg func(tea.Msg), logger *slog.Logger, sshOpts []string) (Terminal, error) {
+	return components.NewSessionTerminal(host, session, width, height, sendMsg, logger, sshOpts)
 }
 
 func (m *Manager) Attach(host model.Host, session model.Session, width, height int) (Terminal, error) {
@@ -64,7 +66,7 @@ func (m *Manager) Attach(host model.Host, session model.Session, width, height i
 	}
 
 	m.logger.Debug("manager attach creating new", "session_id", session.ID)
-	created, err := m.newTerminal(host, session, width, height, m.sendMsg, m.logger)
+	created, err := m.newTerminal(host, session, width, height, m.sendMsg, m.logger, m.sshOpts)
 	if err != nil {
 		return nil, err
 	}

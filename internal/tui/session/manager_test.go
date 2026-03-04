@@ -84,7 +84,7 @@ func newFakeFactory() *fakeFactory {
 	}
 }
 
-func (f *fakeFactory) newTerminal(_ model.Host, session model.Session, _ int, _ int, _ func(tea.Msg), _ *slog.Logger) (Terminal, error) {
+func (f *fakeFactory) newTerminal(_ model.Host, session model.Session, _ int, _ int, _ func(tea.Msg), _ *slog.Logger, _ []string) (Terminal, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -124,7 +124,7 @@ func (f *fakeFactory) allTerminals(sessionID string) []*fakeTerminal {
 
 func TestManagerCRUDGetHasActiveIDs(t *testing.T) {
 	factory := newFakeFactory()
-	m := NewManager(nil, slog.Default())
+	m := NewManager(nil, slog.Default(), nil)
 	m.newTerminal = factory.newTerminal
 
 	host := model.Host{Name: "host-1"}
@@ -181,7 +181,7 @@ func TestManagerCRUDGetHasActiveIDs(t *testing.T) {
 
 func TestManagerAttachDuplicateReuse(t *testing.T) {
 	factory := newFakeFactory()
-	m := NewManager(nil, slog.Default())
+	m := NewManager(nil, slog.Default(), nil)
 	m.newTerminal = factory.newTerminal
 
 	host := model.Host{Name: "host-1"}
@@ -210,7 +210,7 @@ func TestManagerAttachDuplicateReuse(t *testing.T) {
 
 func TestManagerShutdownClosesAllAndClearsMap(t *testing.T) {
 	factory := newFakeFactory()
-	m := NewManager(nil, slog.Default())
+	m := NewManager(nil, slog.Default(), nil)
 	m.newTerminal = factory.newTerminal
 
 	host := model.Host{Name: "host-1"}
@@ -251,7 +251,7 @@ func TestManagerShutdownClosesAllAndClearsMap(t *testing.T) {
 
 func TestManagerResizeAllPropagatesToActiveSessions(t *testing.T) {
 	factory := newFakeFactory()
-	m := NewManager(nil, slog.Default())
+	m := NewManager(nil, slog.Default(), nil)
 	m.newTerminal = factory.newTerminal
 
 	host := model.Host{Name: "host-1"}
@@ -278,7 +278,7 @@ func TestManagerResizeAllPropagatesToActiveSessions(t *testing.T) {
 
 func TestManagerCleanupClosedRemovesClosedAndNilSessions(t *testing.T) {
 	factory := newFakeFactory()
-	m := NewManager(nil, slog.Default())
+	m := NewManager(nil, slog.Default(), nil)
 	m.newTerminal = factory.newTerminal
 
 	host := model.Host{Name: "host-1"}
@@ -324,7 +324,7 @@ func TestManagerCleanupClosedRemovesClosedAndNilSessions(t *testing.T) {
 
 func TestManagerConcurrentAttachGetThreadSafety(t *testing.T) {
 	factory := newFakeFactory()
-	m := NewManager(nil, slog.Default())
+	m := NewManager(nil, slog.Default(), nil)
 	m.newTerminal = factory.newTerminal
 
 	host := model.Host{Name: "host-1"}
