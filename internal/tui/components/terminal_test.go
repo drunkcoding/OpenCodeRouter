@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"syscall"
@@ -38,9 +39,25 @@ func setupMockSSHEnvironment(t *testing.T) model.Host {
 
 	sshScript := `#!/bin/sh
 set -eu
-if [ "${1:-}" = "-t" ]; then
-  shift
-fi
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -t|-tt)
+      shift
+      ;;
+    -o)
+      if [ "$#" -lt 2 ]; then
+        exit 2
+      fi
+      shift 2
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 if [ "$#" -lt 2 ]; then
   exit 2
 fi
@@ -333,6 +350,12 @@ func TestSessionTerminalHelperFunctions(t *testing.T) {
 	cmdWithDir := buildAttachRemoteCommand(model.Host{Name: "dev-1", OpencodeBin: "my-oc"}, sessionWithDir)
 	if !strings.Contains(cmdWithDir, "cd /tmp/work") || !strings.Contains(cmdWithDir, `exec "$OC" -s sess-b`) {
 		t.Fatalf("command with directory missing expected segments: %q", cmdWithDir)
+	}
+
+	attachArgs := buildAttachSSHArgs(model.Host{Name: "dev-1"}, "echo hi")
+	wantAttachArgs := []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-t", "dev-1", "echo hi"}
+	if !reflect.DeepEqual(attachArgs, wantAttachArgs) {
+		t.Fatalf("attach ssh args = %v, want %v", attachArgs, wantAttachArgs)
 	}
 
 	if !isPTYClosureError(io.EOF) {
