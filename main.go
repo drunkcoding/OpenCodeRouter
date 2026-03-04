@@ -4,10 +4,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -45,12 +47,43 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Logger.
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+	// Logger (file-backed to avoid BubbleTea alt-screen swallowing stdout/stderr logs).
+	var (
+		logFile *os.File
+		logPath string
+	)
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		logDir := filepath.Join(home, ".local", "share", "opencoderouter")
+		if err := os.MkdirAll(logDir, 0o755); err == nil {
+			path := filepath.Join(logDir, "debug.log")
+			if f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+				logFile = f
+				logPath = path
+			}
+		}
+	}
+	if logFile == nil {
+		const fallback = "/tmp/ocr-debug.log"
+		if f, err := os.OpenFile(fallback, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+			logFile = f
+			logPath = fallback
+		}
+	}
+	var logWriter io.Writer = io.Discard
+	if logFile != nil {
+		logWriter = logFile
+		defer logFile.Close()
+	} else {
+		logPath = "disabled (io.Discard)"
+	}
+	logger := slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
 	}))
+	slog.SetDefault(logger)
+	fmt.Fprintf(os.Stderr, "Logs: %s\n", logPath)
 
-	logger.Info("starting OpenCode Router",
+	logger.Info("OpenCodeRouter starting",
+		"log_file", logPath,
 		"listen", cfg.ListenAddr,
 		"username", cfg.Username,
 		"scan_range", fmt.Sprintf("%d-%d", cfg.ScanPortStart, cfg.ScanPortEnd),
