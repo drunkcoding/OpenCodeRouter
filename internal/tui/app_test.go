@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -49,7 +51,7 @@ func TestAppSmoke(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Display.Animation = false
 
-	app := NewApp(cfg, fakeDiscoverer{hosts: []model.Host{{Name: "dev-1", Label: "dev-1"}}}, fakeProber{})
+	app := NewApp(cfg, fakeDiscoverer{hosts: []model.Host{{Name: "dev-1", Label: "dev-1"}}}, fakeProber{}, nil)
 	initCmd := app.Init()
 	if initCmd == nil {
 		t.Fatal("expected init command")
@@ -65,5 +67,37 @@ func TestAppSmoke(t *testing.T) {
 	view := app.View()
 	if strings.TrimSpace(view.Content) == "" {
 		t.Fatal("expected non-empty view output")
+	}
+}
+
+func TestNewApp_NilLoggerDefaultsToDiscard(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+
+	app := NewApp(cfg, fakeDiscoverer{}, fakeProber{}, nil)
+	if app == nil {
+		t.Fatal("expected app to be constructed")
+	}
+	if app.logger == nil {
+		t.Fatal("expected app.logger to be non-nil when input logger is nil")
+	}
+}
+
+func TestNewApp_LoggerPropagated(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	app := NewApp(cfg, fakeDiscoverer{}, fakeProber{}, logger)
+	if app.logger == nil {
+		t.Fatal("expected app logger to be initialized")
+	}
+
+	_ = app.Init()
+	if !strings.Contains(buf.String(), "component=app") {
+		t.Fatal("expected app logger output to include component field")
 	}
 }

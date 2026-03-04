@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os/exec"
 	"path"
 	"strings"
@@ -33,9 +35,10 @@ type Prober interface {
 
 // AppModel is the top-level Bubble Tea model for opencode-remote.
 type AppModel struct {
-	cfg   config.Config
-	theme theme.Theme
-	keys  keys.KeyMap
+	cfg    config.Config
+	theme  theme.Theme
+	keys   keys.KeyMap
+	logger *slog.Logger
 
 	discovery Discoverer
 	prober    Prober
@@ -56,25 +59,36 @@ type AppModel struct {
 	showInspect bool
 }
 
-const errorToastTimeout = 5 * time.Second
+const (
+	errorToastTimeout      = 5 * time.Second
+	maxSanitizedErrorRunes = 320
+)
 
 // NewApp constructs the root model with injected services.
-func NewApp(cfg config.Config, discoverer Discoverer, proberSvc Prober) *AppModel {
+func NewApp(cfg config.Config, discoverer Discoverer, proberSvc Prober, logger *slog.Logger) *AppModel {
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+
+	appLogger := logger.With("component", "app")
+	probeLogger := logger.With("component", "probe")
+	discoveryLogger := logger.With("component", "discovery")
+
 	th := theme.ByName(cfg.Display.Theme)
 	keyMap := keys.NewKeyMap(cfg.Keybindings)
 
 	if discoverer == nil {
-		discoverer = discovery.NewDiscoveryService(cfg, nil)
+		discoverer = discovery.NewDiscoveryService(cfg, nil, discoveryLogger)
 	}
 	if proberSvc == nil {
-		cache := probe.NewCacheStore(cfg.Cache.TTL)
-		proberSvc = probe.NewProbeService(cfg, nil, cache)
+		proberSvc = probe.NewProbeService(cfg, nil, nil, probeLogger)
 	}
 
 	app := &AppModel{
 		cfg:         cfg,
 		theme:       th,
 		keys:        keyMap,
+		logger:      appLogger,
 		discovery:   discoverer,
 		prober:      proberSvc,
 		header:      components.NewHeaderBar(th, cfg.Polling.Interval),
@@ -96,6 +110,12 @@ func NewApp(cfg config.Config, discoverer Discoverer, proberSvc Prober) *AppMode
 func (m *AppModel) Init() tea.Cmd {
 	m.nextRefresh = time.Now().Add(m.cfg.Polling.Interval)
 	m.header.SetRefreshDeadline(m.nextRefresh)
+	m.logger.Info("app init",
+		"refresh_interval", m.cfg.Polling.Interval,
+		"host_include_patterns", len(m.cfg.Hosts.Include),
+		"host_ignore_patterns", len(m.cfg.Hosts.Ignore),
+		"theme", m.cfg.Display.Theme,
+	)
 	return tea.Batch(
 		m.header.Init(),
 		m.spinner.Init(),
@@ -120,18 +140,27 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case model.TickMsg:
-		if !m.nextRefresh.IsZero() && !typed.Now.Before(m.nextRefresh) {
+		refreshDue := !m.nextRefresh.IsZero() && !typed.Now.Before(m.nextRefresh)
+		m.logger.Debug("update message", "message_type", "TickMsg", "refresh_due", refreshDue)
+		if refreshDue {
 			cmds = append(cmds, m.refreshCmd())
 		}
 		m.header.SetRefreshDeadline(m.nextRefresh)
 		cmds = append(cmds, tickCmd())
 
 	case model.ProbeResultMsg:
+		m.logger.Debug("update message", "message_type", "ProbeResultMsg", "hosts", len(typed.Hosts), "has_error", typed.Err != nil)
 		if toastCmd := m.applyProbeResult(typed); toastCmd != nil {
 			cmds = append(cmds, toastCmd)
 		}
 
 	case model.AttachFinishedMsg:
+		if typed.Err != nil {
+			m.logger.Info("attach finished", "status", "error")
+			m.logger.Error("session attach failed", "error", sanitizeError(typed.Err))
+		} else {
+			m.logger.Info("attach finished", "status", "success")
+		}
 		if typed.Err != nil {
 			if toastCmd := m.showErrorToast(typed.Err); toastCmd != nil {
 				cmds = append(cmds, toastCmd)
@@ -161,6 +190,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case model.CreateSessionFinishedMsg:
 		if typed.Err != nil {
+			m.logger.Info("create session finished", "status", "error")
+			m.logger.Error("session create failed", "error", sanitizeError(typed.Err))
+		} else {
+			m.logger.Info("create session finished", "status", "success")
+		}
+		if typed.Err != nil {
 			if toastCmd := m.showErrorToast(typed.Err); toastCmd != nil {
 				cmds = append(cmds, toastCmd)
 			}
@@ -168,6 +203,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.refreshCmd())
 
 	case model.KillSessionFinishedMsg:
+		if typed.Err != nil {
+			m.logger.Info("kill session finished", "status", "error")
+			m.logger.Error("session kill failed", "error", sanitizeError(typed.Err))
+		} else {
+			m.logger.Info("kill session finished", "status", "success")
+		}
 		if typed.Err != nil {
 			if toastCmd := m.showErrorToast(typed.Err); toastCmd != nil {
 				cmds = append(cmds, toastCmd)
@@ -177,6 +218,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case model.GitCloneFinishedMsg:
 		if typed.Err != nil {
+			m.logger.Info("git clone finished", "status", "error")
+			m.logger.Error("session git clone failed", "error", sanitizeError(typed.Err))
+		} else {
+			m.logger.Info("git clone finished", "status", "success")
+		}
+		if typed.Err != nil {
 			if toastCmd := m.showErrorToast(typed.Err); toastCmd != nil {
 				cmds = append(cmds, toastCmd)
 			}
@@ -184,6 +231,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.refreshCmd())
 
 	case tea.KeyPressMsg:
+		keyCategory := ""
 		if m.modal.Active() {
 			var modalCmd tea.Cmd
 			m.modal, modalCmd = m.modal.Update(typed)
@@ -196,12 +244,16 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch {
 		case keys.Matches(typed.String(), m.keys.Quit):
+			m.logger.Debug("update message", "message_type", "KeyPressMsg", "category", "quit")
 			return m, tea.Quit
 		case keys.Matches(typed.String(), m.keys.Refresh):
+			keyCategory = "refresh"
 			cmds = append(cmds, m.refreshCmd())
 		case keys.Matches(typed.String(), m.keys.Search):
+			keyCategory = "search"
 			m.header.FocusSearch()
 		case keys.Matches(typed.String(), m.keys.NewSession):
+			keyCategory = "new_session"
 			host, project, _, ok := m.tree.Selected()
 			if ok && host != nil && host.Status == model.HostStatusOnline {
 				if project != nil && len(project.Sessions) > 0 {
@@ -211,26 +263,32 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case keys.Matches(typed.String(), m.keys.KillSession):
+			keyCategory = "kill_session"
 			if host, _, session, ok := m.tree.Selected(); ok && host != nil && session != nil {
 				m.modal.OpenConfirmKill(host.Name, session.ID, session.Directory)
 			}
 		case keys.Matches(typed.String(), m.keys.GitClone):
+			keyCategory = "git_clone"
 			host, _, _, ok := m.tree.Selected()
 			if ok && host != nil && host.Status == model.HostStatusOnline {
 				m.modal.OpenGitClone(host.Name)
 			}
 		case keys.Matches(typed.String(), m.keys.CycleView):
+			keyCategory = "cycle_view"
 			m.showInspect = !m.showInspect
 			m.resize(m.width, m.height)
 		case keys.Matches(typed.String(), m.keys.Inspect):
+			keyCategory = "inspect"
 			m.showInspect = true
 			m.resize(m.width, m.height)
 		case keys.Matches(typed.String(), m.keys.Attach):
+			keyCategory = "attach"
 			host, _, session, ok := m.tree.Selected()
 			if ok && host != nil && session != nil {
 				cmds = append(cmds, m.attachCmd(*host, *session))
 			}
 		case keys.Matches(typed.String(), m.keys.Authenticate):
+			keyCategory = "authenticate"
 			host, _, _, ok := m.tree.Selected()
 			if ok && host != nil && (host.Status == model.HostStatusAuthRequired || host.Transport == model.TransportBlocked) {
 				bootstrapCmds := m.getMultiHopBootstrapCmds(*host)
@@ -239,9 +297,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case keys.Matches(typed.String(), m.keys.ErrorDetail):
+			keyCategory = "error_detail"
 			if m.toast.Visible() && m.lastError != nil {
 				m.modal.OpenError(m.lastError)
 			}
+		}
+		if keyCategory != "" {
+			m.logger.Debug("update message", "message_type", "KeyPressMsg", "category", keyCategory)
 		}
 	}
 
@@ -308,6 +370,9 @@ func (m *AppModel) refreshCmd() tea.Cmd {
 	timeout := m.cfg.Polling.Timeout
 
 	return func() tea.Msg {
+		startedAt := time.Now()
+		m.logger.Info("refresh started", "timeout", timeout)
+
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
@@ -319,6 +384,18 @@ func (m *AppModel) refreshCmd() tea.Cmd {
 			resultErr = errors.Join(discoverErr, probeErr)
 		}
 
+		elapsed := time.Since(startedAt)
+		errCount := countRefreshErrors(probed, resultErr)
+		m.logger.Info("refresh complete", "hosts", len(probed), "duration", elapsed, "errors", errCount)
+		if resultErr != nil {
+			m.logger.Error(
+				"refresh failed",
+				"error", sanitizeError(resultErr),
+				"discover_error", discoverErr != nil,
+				"probe_error", probeErr != nil,
+			)
+		}
+
 		return model.ProbeResultMsg{
 			Hosts:       probed,
 			Err:         resultErr,
@@ -328,9 +405,13 @@ func (m *AppModel) refreshCmd() tea.Cmd {
 }
 
 func (m *AppModel) applyProbeResult(msg model.ProbeResultMsg) tea.Cmd {
+	hostsBefore := len(m.hosts)
+	errorsBefore := countHostErrors(m.hosts)
+
 	m.hosts = append([]model.Host(nil), msg.Hosts...)
 	m.tree.SetHosts(m.hosts)
-	m.header.SetStats(calculateFleetStats(m.hosts))
+	stats := calculateFleetStats(m.hosts)
+	m.header.SetStats(stats)
 
 	refreshedAt := msg.RefreshedAt
 	if refreshedAt.IsZero() {
@@ -338,6 +419,14 @@ func (m *AppModel) applyProbeResult(msg model.ProbeResultMsg) tea.Cmd {
 	}
 	m.nextRefresh = refreshedAt.Add(m.cfg.Polling.Interval)
 	m.header.SetRefreshDeadline(m.nextRefresh)
+	m.logger.Debug(
+		"apply probe result",
+		"hosts_before", hostsBefore,
+		"hosts_after", len(m.hosts),
+		"errors_before", errorsBefore,
+		"errors_after", countHostErrors(m.hosts),
+		"has_error", msg.Err != nil,
+	)
 
 	m.lastError = msg.Err
 	if msg.Err != nil {
@@ -483,6 +572,8 @@ func (m *AppModel) getMultiHopBootstrapCmds(host model.Host) []string {
 }
 
 func (m *AppModel) attachCmd(host model.Host, session model.Session) tea.Cmd {
+	m.logger.Info("attach initiated", "host", host.Name, "project", session.Project, "session_id", session.ID)
+
 	bin := host.OpencodeBin
 	if bin == "" {
 		bin = "opencode"
@@ -512,6 +603,7 @@ func (m *AppModel) showErrorToast(err error) tea.Cmd {
 	if err == nil {
 		return nil
 	}
+	m.logger.Error("error toast shown", "error", sanitizeError(err), "timeout", errorToastTimeout)
 
 	cmd := m.toast.Show(err.Error(), components.ToastSeverityError, errorToastTimeout)
 	m.resize(m.width, m.height)
@@ -527,6 +619,8 @@ func (m *AppModel) syncFooterContext() {
 }
 
 func (m *AppModel) createSessionCmd(host model.Host, directory string) tea.Cmd {
+	m.logger.Info("create session initiated", "host", host.Name, "directory", directory)
+
 	bin := host.OpencodeBin
 	if bin == "" {
 		bin = "opencode"
@@ -544,6 +638,8 @@ func (m *AppModel) createSessionCmd(host model.Host, directory string) tea.Cmd {
 }
 
 func (m *AppModel) killSessionCmd(host model.Host, sessionID, directory string) tea.Cmd {
+	m.logger.Info("kill session initiated", "host", host.Name, "session_id", sessionID)
+
 	bin := host.OpencodeBin
 	if bin == "" {
 		bin = "opencode"
@@ -562,6 +658,8 @@ func (m *AppModel) killSessionCmd(host model.Host, sessionID, directory string) 
 }
 
 func (m *AppModel) gitCloneSessionCmd(host model.Host, gitURL string) tea.Cmd {
+	m.logger.Info("git clone initiated", "host", host.Name, "git_url", gitURL)
+
 	bin := host.OpencodeBin
 	if bin == "" {
 		bin = "opencode"
@@ -591,4 +689,77 @@ func (m *AppModel) findHostByName(name string) *model.Host {
 func repoNameFromURL(gitURL string) string {
 	base := path.Base(gitURL)
 	return strings.TrimSuffix(base, ".git")
+}
+
+func countHostErrors(hosts []model.Host) int {
+	count := 0
+	for _, host := range hosts {
+		if host.LastError != "" || host.TransportError != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func countRefreshErrors(hosts []model.Host, refreshErr error) int {
+	count := countHostErrors(hosts)
+	if refreshErr != nil {
+		count++
+	}
+	return count
+}
+
+func sanitizeError(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	msg := strings.TrimSpace(err.Error())
+	msg = strings.NewReplacer("\r", " ", "\n", " ").Replace(msg)
+	msg = strings.Join(strings.Fields(msg), " ")
+	msg = redactCommandOutputTail(msg)
+
+	runes := []rune(msg)
+	if len(runes) > maxSanitizedErrorRunes {
+		msg = strings.TrimSpace(string(runes[:maxSanitizedErrorRunes-1])) + "…"
+	}
+
+	return msg
+}
+
+func redactCommandOutputTail(msg string) string {
+	if msg == "" {
+		return ""
+	}
+
+	type marker struct {
+		needle string
+		label  string
+	}
+
+	markers := []marker{
+		{needle: "stderr:", label: "stderr"},
+		{needle: "stdout:", label: "stdout"},
+	}
+
+	lower := strings.ToLower(msg)
+	firstIdx := -1
+	firstLabel := ""
+	for _, m := range markers {
+		if idx := strings.Index(lower, m.needle); idx >= 0 && (firstIdx == -1 || idx < firstIdx) {
+			firstIdx = idx
+			firstLabel = m.label
+		}
+	}
+
+	if firstIdx == -1 {
+		return msg
+	}
+
+	prefix := strings.TrimSpace(msg[:firstIdx])
+	if prefix == "" {
+		return firstLabel + ": [redacted]"
+	}
+
+	return prefix + " " + firstLabel + ": [redacted]"
 }

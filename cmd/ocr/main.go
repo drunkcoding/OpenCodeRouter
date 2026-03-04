@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
+	"path/filepath"
 
 	"opencoderouter/internal/tui"
 	"opencoderouter/internal/tui/config"
@@ -22,6 +24,8 @@ func main() {
 
 func newRootCmd() *cobra.Command {
 	var cfgPath string
+	var debug bool
+	var logFile string
 
 	cmd := &cobra.Command{
 		Use:          "ocr",
@@ -39,7 +43,18 @@ func newRootCmd() *cobra.Command {
 				return fmt.Errorf("load config: %w", err)
 			}
 
-			app := tui.NewApp(cfg, nil, nil)
+			logger, closeLogFile, err := buildLogger(debug, logFile)
+			if err != nil {
+				return err
+			}
+			if closeLogFile != nil {
+				defer closeLogFile()
+			}
+			if logger != nil {
+				logger.Info("ocr logger initialized", "debug", debug)
+			}
+
+			app := tui.NewApp(cfg, nil, nil, logger)
 			program := tea.NewProgram(app)
 			if _, err := program.Run(); err != nil {
 				return fmt.Errorf("run tui: %w", err)
@@ -49,5 +64,44 @@ func newRootCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&cfgPath, "config", "", "Path to remote-tui.yaml")
+	cmd.Flags().BoolVar(&debug, "debug", false, "Enable debug logging")
+	cmd.Flags().StringVar(&logFile, "log-file", "", "Path to log file")
 	return cmd
+}
+
+func buildLogger(debug bool, logFile string) (*slog.Logger, func(), error) {
+	if debug && logFile == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve home dir for default log file: %w", err)
+		}
+		logFile = filepath.Join(home, ".ocr", "ocr.log")
+	}
+
+	if !debug && logFile == "" {
+		return nil, nil, nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(logFile), 0o750); err != nil {
+		return nil, nil, fmt.Errorf("create log directory: %w", err)
+	}
+
+	file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open log file: %w", err)
+	}
+
+	closeFn := func() {
+		if closeErr := file.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "ocr: close log file %q: %v\n", logFile, closeErr)
+		}
+	}
+
+	level := slog.LevelInfo
+	if debug {
+		level = slog.LevelDebug
+	}
+
+	logger := slog.New(slog.NewTextHandler(file, &slog.HandlerOptions{Level: level}))
+	return logger, closeFn, nil
 }

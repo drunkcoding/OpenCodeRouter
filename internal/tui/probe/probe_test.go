@@ -52,7 +52,7 @@ func TestProbeHosts_ParsesSessions(t *testing.T) {
 		err: map[string]error{},
 	}
 
-	svc := NewProbeService(cfg, runner, NewCacheStore(time.Minute))
+	svc := NewProbeService(cfg, runner, NewCacheStore(time.Minute), nil)
 	hosts, err := svc.ProbeHosts(context.Background(), []model.Host{{Name: "dev-1"}})
 	if err != nil {
 		t.Fatalf("probe hosts failed: %v", err)
@@ -82,7 +82,7 @@ func TestProbeHosts_PropagatesErrors(t *testing.T) {
 		},
 	}
 
-	svc := NewProbeService(cfg, runner, nil)
+	svc := NewProbeService(cfg, runner, nil, nil)
 	hosts, err := svc.ProbeHosts(context.Background(), []model.Host{{Name: "prod-1"}})
 	if err == nil {
 		t.Fatalf("expected error, got nil")
@@ -107,7 +107,7 @@ func TestProbeHosts_OpencodeNativeFormat(t *testing.T) {
 		err: map[string]error{},
 	}
 
-	svc := NewProbeService(cfg, runner, NewCacheStore(time.Minute))
+	svc := NewProbeService(cfg, runner, NewCacheStore(time.Minute), nil)
 	hosts, err := svc.ProbeHosts(context.Background(), []model.Host{{Name: "dev-2"}})
 	if err != nil {
 		t.Fatalf("probe failed: %v", err)
@@ -145,7 +145,7 @@ func TestProbeHosts_MultiArraySweep(t *testing.T) {
 		err: map[string]error{},
 	}
 
-	svc := NewProbeService(cfg, runner, NewCacheStore(time.Minute))
+	svc := NewProbeService(cfg, runner, NewCacheStore(time.Minute), nil)
 	hosts, err := svc.ProbeHosts(context.Background(), []model.Host{{Name: "dev-3"}})
 	if err != nil {
 		t.Fatalf("probe failed: %v", err)
@@ -169,7 +169,7 @@ func TestProbeHosts_UsesCache(t *testing.T) {
 	}
 
 	cache := NewCacheStore(time.Minute)
-	svc := NewProbeService(cfg, runner, cache)
+	svc := NewProbeService(cfg, runner, cache, nil)
 
 	_, err := svc.ProbeHosts(context.Background(), []model.Host{{Name: "cache-1"}})
 	if err != nil {
@@ -184,5 +184,17 @@ func TestProbeHosts_UsesCache(t *testing.T) {
 	defer runner.mu.Unlock()
 	if runner.calls != 1 {
 		t.Fatalf("expected runner to be called once due cache, got %d", runner.calls)
+	}
+}
+
+func TestNewProbeService_NilLoggerDefaultsToDiscard(t *testing.T) {
+	t.Parallel()
+
+	svc := NewProbeService(config.DefaultConfig(), &probeRunnerMock{}, nil, nil)
+	if svc == nil {
+		t.Fatal("expected probe service to be constructed")
+	}
+	if svc.logger == nil {
+		t.Fatal("expected probe service logger to default to non-nil discard logger")
 	}
 }

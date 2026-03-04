@@ -86,7 +86,7 @@ Host prod-1 dev-1 backup-1
 		"dev-1":  {stdout: "hostname 10.0.0.2\nuser dev\n"},
 	}}
 
-	svc := NewDiscoveryService(cfg, runner)
+	svc := NewDiscoveryService(cfg, runner, nil)
 	svc.sshConfigPath = sshPath
 
 	hosts, err := svc.Discover(context.Background())
@@ -106,5 +106,17 @@ Host prod-1 dev-1 backup-1
 	}
 	if hosts[0].OpencodeBin != "/usr/local/bin/opencode" {
 		t.Fatalf("expected override opencode path, got %q", hosts[0].OpencodeBin)
+	}
+}
+
+func TestNewDiscoveryService_NilLoggerDefaultsToDiscard(t *testing.T) {
+	t.Parallel()
+
+	svc := NewDiscoveryService(config.DefaultConfig(), mockRunner{}, nil)
+	if svc == nil {
+		t.Fatal("expected discovery service to be constructed")
+	}
+	if svc.logger == nil {
+		t.Fatal("expected discovery service logger to default to non-nil discard logger")
 	}
 }
