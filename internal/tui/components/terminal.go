@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sync"
@@ -28,11 +29,13 @@ const (
 var ErrSessionTerminalClosed = errors.New("session terminal is closed")
 
 type SessionTerminal struct {
-	sessionID string
-	emulator  *vt.SafeEmulator
-	cmd       *exec.Cmd
-	pty       xpty.Pty
-	sendMsg   func(tea.Msg)
+	sessionID       string
+	emulator        *vt.SafeEmulator
+	cmd             *exec.Cmd
+	pty             xpty.Pty
+	sendMsg         func(tea.Msg)
+	logger          *slog.Logger
+	viewEmptyLogged bool
 
 	mu        sync.RWMutex
 	width     int
@@ -42,7 +45,7 @@ type SessionTerminal struct {
 	closeOnce sync.Once
 }
 
-func NewSessionTerminal(host model.Host, session model.Session, width, height int, sendMsg func(tea.Msg)) (*SessionTerminal, error) {
+func NewSessionTerminal(host model.Host, session model.Session, width, height int, sendMsg func(tea.Msg), logger *slog.Logger) (*SessionTerminal, error) {
 	if host.Name == "" {
 		return nil, errors.New("host name is required")
 	}
@@ -50,19 +53,36 @@ func NewSessionTerminal(host model.Host, session model.Session, width, height in
 		return nil, errors.New("session id is required")
 	}
 
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	width, height = normalizeTerminalSize(width, height)
+
+	logger.Info("terminal creating", "host", host.Name, "session_id", session.ID, "width", width, "height", height)
 
 	ptyHandle, err := xpty.NewPty(width, height)
 	if err != nil {
+		logger.Error("terminal pty allocation failed", "error", err)
 		return nil, fmt.Errorf("allocate pty: %w", err)
 	}
+	logger.Debug("terminal pty allocated", "session_id", session.ID)
 
 	remoteCmd := buildAttachRemoteCommand(host, session)
 	cmd := exec.Command("ssh", buildAttachSSHArgs(host, remoteCmd)...)
+	logger.Debug("terminal ssh command", "session_id", session.ID, "args", cmd.Args)
+
 	if err := ptyHandle.Start(cmd); err != nil {
 		_ = ptyHandle.Close()
+		logger.Error("terminal ssh start failed", "session_id", session.ID, "error", err)
 		return nil, fmt.Errorf("start ssh process in pty: %w", err)
 	}
+
+	pid := 0
+	if cmd.Process != nil {
+		pid = cmd.Process.Pid
+	}
+	logger.Info("terminal ssh started", "session_id", session.ID, "pid", pid)
 
 	t := &SessionTerminal{
 		sessionID: session.ID,
@@ -70,10 +90,12 @@ func NewSessionTerminal(host model.Host, session model.Session, width, height in
 		cmd:       cmd,
 		pty:       ptyHandle,
 		sendMsg:   sendMsg,
+		logger:    logger,
 		width:     width,
 		height:    height,
 	}
 
+	logger.Debug("terminal goroutines launching", "session_id", session.ID)
 	go t.readLoop()
 	go t.waitLoop()
 
@@ -84,13 +106,19 @@ func (t *SessionTerminal) View() string {
 	if t == nil || t.emulator == nil {
 		return ""
 	}
-	return t.emulator.Render()
+	rendered := t.emulator.Render()
+	if rendered == "" && !t.viewEmptyLogged {
+		t.logger.Warn("terminal view empty", "session_id", t.sessionID)
+		t.viewEmptyLogged = true
+	}
+	return rendered
 }
 
 func (t *SessionTerminal) WriteInput(data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
+	t.logger.Debug("terminal writeInput", "session_id", t.sessionID, "bytes", len(data))
 	if t.IsClosed() {
 		return t.closedError()
 	}
@@ -151,23 +179,29 @@ func (t *SessionTerminal) Err() error {
 }
 
 func (t *SessionTerminal) readLoop() {
+	t.logger.Debug("terminal readLoop started", "session_id", t.sessionID)
 	buf := make([]byte, 4096)
+	defer t.logger.Debug("terminal readLoop exiting", "session_id", t.sessionID)
 
 	for {
 		n, err := t.pty.Read(buf)
 		if n > 0 {
 			chunk := append([]byte(nil), buf[:n]...)
 			if _, writeErr := t.emulator.Write(chunk); writeErr != nil {
+				t.logger.Error("terminal emulator write error", "session_id", t.sessionID, "error", writeErr)
 				_ = t.closeWithErr(writeErr)
 				return
 			}
+			t.logger.Debug("terminal readLoop chunk", "session_id", t.sessionID, "bytes", n, "preview", previewBytes(chunk, 200))
 			t.emit(model.TerminalOutputMsg{SessionID: t.sessionID, Data: chunk})
 		}
 
 		if err != nil {
 			if isPTYClosureError(err) || t.IsClosed() {
+				t.logger.Debug("terminal readLoop closure", "session_id", t.sessionID, "reason", "pty_closed")
 				return
 			}
+			t.logger.Error("terminal readLoop error", "session_id", t.sessionID, "error", err)
 			_ = t.closeWithErr(err)
 			return
 		}
@@ -175,7 +209,9 @@ func (t *SessionTerminal) readLoop() {
 }
 
 func (t *SessionTerminal) waitLoop() {
+	t.logger.Debug("terminal waitLoop started", "session_id", t.sessionID)
 	err := xpty.WaitProcess(context.Background(), t.cmd)
+	t.logger.Info("terminal process exited", "session_id", t.sessionID, "error", err)
 	_ = t.closeWithErr(err)
 }
 
@@ -183,6 +219,8 @@ func (t *SessionTerminal) closeWithErr(reason error) error {
 	if t == nil {
 		return nil
 	}
+
+	t.logger.Info("terminal closing", "session_id", t.sessionID, "reason", reason)
 
 	var closeErr error
 
@@ -206,6 +244,7 @@ func (t *SessionTerminal) closeWithErr(reason error) error {
 		t.err = finalErr
 		t.mu.Unlock()
 
+		t.logger.Info("terminal closed", "session_id", t.sessionID, "error", finalErr)
 		t.emit(model.TerminalClosedMsg{SessionID: t.sessionID, Err: finalErr})
 	})
 
@@ -221,7 +260,7 @@ func (t *SessionTerminal) closedError() error {
 
 func (t *SessionTerminal) emit(msg tea.Msg) {
 	if t.sendMsg != nil {
-		t.sendMsg(msg)
+		go t.sendMsg(msg)
 	}
 }
 
@@ -268,4 +307,11 @@ func isIgnorableKillError(err error) bool {
 	return err == nil ||
 		errors.Is(err, os.ErrProcessDone) ||
 		errors.Is(err, syscall.ESRCH)
+}
+
+func previewBytes(data []byte, maxLen int) string {
+	if len(data) > maxLen {
+		return string(data[:maxLen])
+	}
+	return string(data)
 }

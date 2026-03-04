@@ -93,6 +93,11 @@ type TerminalOutputMsg struct {
 	Data      []byte
 }
 
+type TerminalInputForwardedMsg struct {
+	SessionID string
+	Err       error
+}
+
 type TerminalClosedMsg struct {
 	SessionID string
 	Err       error

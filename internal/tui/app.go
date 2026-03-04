@@ -45,6 +45,7 @@ const (
 type terminalSessionManager interface {
 	Attach(host model.Host, session model.Session, width, height int) (session.Terminal, error)
 	Get(sessionID string) session.Terminal
+	Remove(sessionID string)
 	ResizeAll(width, height int)
 	Shutdown()
 	CleanupClosed()
@@ -122,7 +123,7 @@ func NewApp(cfg config.Config, discoverer Discoverer, proberSvc Prober, logger *
 		spinner:        components.NewBrailleSpinner(cfg.Display.Animation),
 		showInspect:    true,
 		activeView:     viewTree,
-		sessionManager: session.NewManager(nil),
+		sessionManager: session.NewManager(nil, logger),
 	}
 	app.tree.SetActiveSessionLookup(func(sessionID string) bool {
 		if strings.TrimSpace(sessionID) == "" {
@@ -149,11 +150,11 @@ func (m *AppModel) SetProgram(p *tea.Program) {
 	}
 
 	if p == nil {
-		m.sessionManager = session.NewManager(nil)
+		m.sessionManager = session.NewManager(nil, m.logger)
 		return
 	}
 
-	m.sessionManager = session.NewManager(p.Send)
+	m.sessionManager = session.NewManager(p.Send, m.logger)
 }
 
 // Init starts animation and the first refresh cycle.
@@ -208,6 +209,19 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case model.TerminalOutputMsg:
 		if typed.SessionID == m.activeSessionID {
 			m.logger.Debug("terminal output", "session_id", typed.SessionID, "bytes", len(typed.Data))
+		}
+
+	case model.TerminalInputForwardedMsg:
+		if typed.Err != nil {
+			m.logger.Error("terminal input forwarding failed", "session_id", typed.SessionID, "error", sanitizeError(typed.Err))
+			m.ensureSessionManager().CleanupClosed()
+			if typed.SessionID == m.activeSessionID && m.activeTerminal() == nil {
+				m.activeView = viewTree
+				m.activeSessionID = ""
+			}
+			if toastCmd := m.showErrorToast(typed.Err); toastCmd != nil {
+				cmds = append(cmds, toastCmd)
+			}
 		}
 
 	case model.TerminalClosedMsg:
@@ -325,17 +339,14 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			if data := extractKeyBytes(typed); len(data) > 0 {
-				if err := terminal.WriteInput(data); err != nil {
-					m.logger.Error("terminal input forwarding failed", "session_id", m.activeSessionID, "error", sanitizeError(err))
-					m.ensureSessionManager().CleanupClosed()
-					if m.activeTerminal() == nil {
-						m.activeView = viewTree
-						m.activeSessionID = ""
+				input := append([]byte(nil), data...)
+				sessionID := m.activeSessionID
+				cmds = append(cmds, func() tea.Msg {
+					if err := terminal.WriteInput(input); err != nil {
+						return model.TerminalInputForwardedMsg{SessionID: sessionID, Err: err}
 					}
-					if toastCmd := m.showErrorToast(err); toastCmd != nil {
-						cmds = append(cmds, toastCmd)
-					}
-				}
+					return nil
+				})
 			}
 
 			m.syncFooterContext()
@@ -706,9 +717,9 @@ func (m *AppModel) ensureSessionManager() terminalSessionManager {
 	}
 
 	if m.program != nil {
-		m.sessionManager = session.NewManager(m.program.Send)
+		m.sessionManager = session.NewManager(m.program.Send, m.logger)
 	} else {
-		m.sessionManager = session.NewManager(nil)
+		m.sessionManager = session.NewManager(nil, m.logger)
 	}
 
 	return m.sessionManager
@@ -731,6 +742,7 @@ func (m *AppModel) attachSession(host model.Host, sessionData model.Session) err
 	m.logger.Info("attach initiated", "host", host.Name, "project", sessionData.Project, "session_id", sessionData.ID)
 
 	manager := m.ensureSessionManager()
+	hadExistingTerminal := manager.Get(sessionData.ID) != nil
 	terminal, err := manager.Attach(host, sessionData, m.width, m.height)
 	if err != nil {
 		return err
@@ -744,6 +756,19 @@ func (m *AppModel) attachSession(host model.Host, sessionData model.Session) err
 		}
 		if terminal == nil || terminal.IsClosed() {
 			return fmt.Errorf("terminal unavailable for session %s", sessionData.ID)
+		}
+	}
+
+	if hadExistingTerminal && strings.TrimSpace(terminal.View()) == "" {
+		m.logger.Warn("cached terminal was blank on re-attach; refreshing", "session_id", sessionData.ID)
+		manager.Remove(sessionData.ID)
+		terminal, err = manager.Attach(host, sessionData, m.width, m.height)
+		if err != nil {
+			return err
+		}
+		if terminal == nil || terminal.IsClosed() {
+			manager.CleanupClosed()
+			return fmt.Errorf("terminal unavailable for session %s after refresh", sessionData.ID)
 		}
 	}
 

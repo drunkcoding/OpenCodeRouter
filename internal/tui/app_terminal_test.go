@@ -189,6 +189,16 @@ func (f *fakeAppSessionManager) CleanupClosed() {
 	f.mu.Unlock()
 }
 
+func (f *fakeAppSessionManager) Remove(sessionID string) {
+	f.mu.Lock()
+	terminal := f.terminals[sessionID]
+	delete(f.terminals, sessionID)
+	f.mu.Unlock()
+	if terminal != nil {
+		_ = terminal.Close()
+	}
+}
+
 func (f *fakeAppSessionManager) attachCallsSnapshot() []attachCall {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -357,13 +367,19 @@ func TestAppTerminalViewForwardsKeysIncludingQ(t *testing.T) {
 	}
 
 	_, cmd := app.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
-	if cmd != nil {
-		t.Fatalf("non-detach key should not return command, got %v", cmd)
+	if cmd == nil {
+		t.Fatal("non-detach key should return async forwarding command")
+	}
+	if msg := cmd(); msg != nil {
+		_, _ = app.Update(msg)
 	}
 
 	_, cmd = app.Update(tea.KeyPressMsg{Code: 'q', Text: "q"})
-	if cmd != nil {
-		t.Fatalf("'q' in terminal mode should be forwarded, not quit")
+	if cmd == nil {
+		t.Fatal("'q' in terminal mode should return async forwarding command")
+	}
+	if msg := cmd(); msg != nil {
+		_, _ = app.Update(msg)
 	}
 
 	writes := terminal.writesSnapshot()
@@ -476,6 +492,40 @@ func TestAppReattachReusesExistingBackgroundTerminal(t *testing.T) {
 
 	if calls := len(manager.attachCallsSnapshot()); calls != 2 {
 		t.Fatalf("attach call count after re-attach = %d, want 2", calls)
+	}
+}
+
+func TestAppReattachBlankCachedTerminalRefreshesTerminal(t *testing.T) {
+	app, manager, _, sessionData := newTerminalIntegrationApp(t)
+
+	_, _ = app.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	firstTerminal := manager.terminal(sessionData.ID)
+	if firstTerminal == nil {
+		t.Fatal("expected terminal instance after first attach")
+	}
+
+	_, _ = app.Update(tea.KeyPressMsg{Code: ']', Mod: tea.ModCtrl})
+	if app.activeView != viewTree {
+		t.Fatalf("activeView after detach = %v, want %v", app.activeView, viewTree)
+	}
+
+	firstTerminal.viewOutput = ""
+
+	_, _ = app.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if app.activeView != viewTerminal {
+		t.Fatalf("activeView after re-attach = %v, want %v", app.activeView, viewTerminal)
+	}
+
+	secondTerminal := manager.terminal(sessionData.ID)
+	if secondTerminal == nil {
+		t.Fatal("expected terminal instance after refresh")
+	}
+	if firstTerminal == secondTerminal {
+		t.Fatal("blank cached terminal should be refreshed on re-attach")
+	}
+
+	if calls := len(manager.attachCallsSnapshot()); calls != 3 {
+		t.Fatalf("attach call count after blank-terminal refresh = %d, want 3", calls)
 	}
 }
 

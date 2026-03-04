@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 
@@ -20,25 +21,30 @@ type Terminal interface {
 	Err() error
 }
 
-type terminalFactory func(host model.Host, session model.Session, width, height int, sendMsg func(tea.Msg)) (Terminal, error)
+type terminalFactory func(host model.Host, session model.Session, width, height int, sendMsg func(tea.Msg), logger *slog.Logger) (Terminal, error)
 
 type Manager struct {
 	mu          sync.RWMutex
 	sessions    map[string]Terminal
 	sendMsg     func(tea.Msg)
 	newTerminal terminalFactory
+	logger      *slog.Logger
 }
 
-func NewManager(sendMsg func(tea.Msg)) *Manager {
+func NewManager(sendMsg func(tea.Msg), logger *slog.Logger) *Manager {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Manager{
 		sessions:    make(map[string]Terminal),
 		sendMsg:     sendMsg,
 		newTerminal: defaultTerminalFactory,
+		logger:      logger,
 	}
 }
 
-func defaultTerminalFactory(host model.Host, session model.Session, width, height int, sendMsg func(tea.Msg)) (Terminal, error) {
-	return components.NewSessionTerminal(host, session, width, height, sendMsg)
+func defaultTerminalFactory(host model.Host, session model.Session, width, height int, sendMsg func(tea.Msg), logger *slog.Logger) (Terminal, error) {
+	return components.NewSessionTerminal(host, session, width, height, sendMsg, logger)
 }
 
 func (m *Manager) Attach(host model.Host, session model.Session, width, height int) (Terminal, error) {
@@ -53,10 +59,12 @@ func (m *Manager) Attach(host model.Host, session model.Session, width, height i
 	existing := m.sessions[session.ID]
 	m.mu.RUnlock()
 	if existing != nil {
+		m.logger.Debug("manager attach reusing existing", "session_id", session.ID)
 		return existing, nil
 	}
 
-	created, err := m.newTerminal(host, session, width, height, m.sendMsg)
+	m.logger.Debug("manager attach creating new", "session_id", session.ID)
+	created, err := m.newTerminal(host, session, width, height, m.sendMsg, m.logger)
 	if err != nil {
 		return nil, err
 	}
@@ -98,6 +106,7 @@ func (m *Manager) Remove(sessionID string) {
 	m.mu.Unlock()
 
 	if t != nil {
+		m.logger.Debug("manager remove", "session_id", sessionID)
 		_ = t.Close()
 	}
 }
@@ -165,10 +174,16 @@ func (m *Manager) CleanupClosed() {
 	}
 
 	m.mu.Lock()
+	removed := 0
 	for id, terminal := range m.sessions {
 		if terminal == nil || terminal.IsClosed() {
 			delete(m.sessions, id)
+			removed++
 		}
 	}
 	m.mu.Unlock()
+
+	if removed > 0 {
+		m.logger.Debug("manager cleanup", "removed", removed)
+	}
 }
