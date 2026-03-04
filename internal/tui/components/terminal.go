@@ -72,10 +72,25 @@ func NewSessionTerminal(host model.Host, session model.Session, width, height in
 	cmd := exec.Command("ssh", buildAttachSSHArgs(host, remoteCmd)...)
 	logger.Debug("terminal ssh command", "session_id", session.ID, "args", cmd.Args)
 
+	// Set controlling terminal so SSH can properly allocate a remote PTY.
+	// Without this, SSH has no controlling terminal and silently sends 0 bytes.
+	// Ctty is an index into the child fd array (0=stdin), not a raw fd number.
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setsid:  true,
+		Setctty: true,
+		Ctty:    0,
+	}
+
 	if err := ptyHandle.Start(cmd); err != nil {
 		_ = ptyHandle.Close()
 		logger.Error("terminal ssh start failed", "session_id", session.ID, "error", err)
 		return nil, fmt.Errorf("start ssh process in pty: %w", err)
+	}
+
+	// Close slave fd in parent so Read() gets EOF when child exits
+	// instead of blocking forever.
+	if upty, ok := ptyHandle.(*xpty.UnixPty); ok {
+		_ = upty.Slave().Close()
 	}
 
 	pid := 0
@@ -294,7 +309,7 @@ func buildAttachRemoteCommand(host model.Host, session model.Session) string {
 }
 
 func buildAttachSSHArgs(host model.Host, remoteCmd string) []string {
-	return []string{"-o", attachSSHBatchMode, "-o", attachSSHTimeout, "-t", host.Name, remoteCmd}
+	return []string{"-o", attachSSHBatchMode, "-o", attachSSHTimeout, "-t", "-t", host.Name, remoteCmd}
 }
 
 func isPTYClosureError(err error) bool {

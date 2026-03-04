@@ -354,7 +354,7 @@ func TestSessionTerminalHelperFunctions(t *testing.T) {
 	}
 
 	attachArgs := buildAttachSSHArgs(model.Host{Name: "dev-1"}, "echo hi")
-	wantAttachArgs := []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-t", "dev-1", "echo hi"}
+	wantAttachArgs := []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-t", "-t", "dev-1", "echo hi"}
 	if !reflect.DeepEqual(attachArgs, wantAttachArgs) {
 		t.Fatalf("attach ssh args = %v, want %v", attachArgs, wantAttachArgs)
 	}
