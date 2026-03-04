@@ -45,6 +45,12 @@ while [ "$#" -gt 0 ]; do
     -t|-tt)
       shift
       ;;
+    -S)
+      if [ "$#" -lt 2 ]; then
+        exit 2
+      fi
+      shift 2
+      ;;
     -o)
       if [ "$#" -lt 2 ]; then
         exit 2
@@ -354,9 +360,32 @@ func TestSessionTerminalHelperFunctions(t *testing.T) {
 	}
 
 	attachArgs := buildAttachSSHArgs(model.Host{Name: "dev-1"}, "echo hi", nil)
-	wantAttachArgs := []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-t", "-t", "dev-1", "echo hi"}
+	wantAttachArgs := []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ControlMaster=no", "-S", "none", "-t", "-t", "dev-1", "echo hi"}
 	if !reflect.DeepEqual(attachArgs, wantAttachArgs) {
 		t.Fatalf("attach ssh args = %v, want %v", attachArgs, wantAttachArgs)
+	}
+
+	attachArgs = buildAttachSSHArgs(
+		model.Host{Name: "dev-1"},
+		"echo hi",
+		[]string{
+			"-o", "ControlMaster=auto",
+			"-o", "ControlPersist=60",
+			"-o", "ControlPath=~/.ssh/ocr-%n-%C",
+			"-o", "StrictHostKeyChecking=accept-new",
+		},
+	)
+	wantAttachArgs = []string{
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=10",
+		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "ControlMaster=no",
+		"-S", "none",
+		"-t", "-t",
+		"dev-1", "echo hi",
+	}
+	if !reflect.DeepEqual(attachArgs, wantAttachArgs) {
+		t.Fatalf("attach ssh args with opts = %v, want %v", attachArgs, wantAttachArgs)
 	}
 
 	if !isPTYClosureError(io.EOF) {

@@ -8,8 +8,12 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"opencoderouter/internal/tui/model"
 
@@ -35,6 +39,7 @@ type SessionTerminal struct {
 	pty             xpty.Pty
 	sendMsg         func(tea.Msg)
 	logger          *slog.Logger
+	sawOutput       atomic.Bool
 	viewEmptyLogged bool
 
 	mu        sync.RWMutex
@@ -111,8 +116,10 @@ func NewSessionTerminal(host model.Host, session model.Session, width, height in
 	}
 
 	logger.Debug("terminal goroutines launching", "session_id", session.ID)
+	go t.emulatorReplyLoop()
 	go t.readLoop()
 	go t.waitLoop()
+	go t.watchNoOutput(5 * time.Second)
 
 	return t, nil
 }
@@ -201,13 +208,16 @@ func (t *SessionTerminal) readLoop() {
 	for {
 		n, err := t.pty.Read(buf)
 		if n > 0 {
+			t.sawOutput.Store(true)
 			chunk := append([]byte(nil), buf[:n]...)
+			preview := previewBytes(chunk, 200)
+			t.logger.Debug("terminal readLoop bytes", "session_id", t.sessionID, "bytes", n, "preview", preview)
 			if _, writeErr := t.emulator.Write(chunk); writeErr != nil {
 				t.logger.Error("terminal emulator write error", "session_id", t.sessionID, "error", writeErr)
 				_ = t.closeWithErr(writeErr)
 				return
 			}
-			t.logger.Debug("terminal readLoop chunk", "session_id", t.sessionID, "bytes", n, "preview", previewBytes(chunk, 200))
+			t.logger.Debug("terminal readLoop chunk", "session_id", t.sessionID, "bytes", n, "preview", preview)
 			t.emit(model.TerminalOutputMsg{SessionID: t.sessionID, Data: chunk})
 		}
 
@@ -221,6 +231,65 @@ func (t *SessionTerminal) readLoop() {
 			return
 		}
 	}
+}
+
+func (t *SessionTerminal) emulatorReplyLoop() {
+	buf := make([]byte, 1024)
+	t.logger.Debug("terminal emulator reply loop started", "session_id", t.sessionID)
+	for {
+		n, err := t.emulator.Read(buf)
+		if n > 0 {
+			reply := append([]byte(nil), buf[:n]...)
+			preview := previewBytes(reply, 200)
+			if writeErr := t.WriteInput(reply); writeErr != nil {
+				if isPTYClosureError(writeErr) || t.IsClosed() {
+					return
+				}
+				t.logger.Error("terminal emulator reply write failed", "session_id", t.sessionID, "error", writeErr, "bytes", len(reply), "preview", preview)
+				t.closeWithErr(writeErr)
+				return
+			}
+			t.logger.Debug("terminal emulator reply forwarded", "session_id", t.sessionID, "bytes", len(reply), "preview", preview)
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) || t.IsClosed() {
+				return
+			}
+			t.logger.Error("terminal emulator reply loop error", "session_id", t.sessionID, "error", err)
+			t.closeWithErr(err)
+			return
+		}
+	}
+}
+
+func (t *SessionTerminal) watchNoOutput(timeout time.Duration) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	<-timer.C
+
+	if t.IsClosed() || t.sawOutput.Load() {
+		return
+	}
+
+	pid := 0
+	if t.cmd != nil && t.cmd.Process != nil {
+		pid = t.cmd.Process.Pid
+	}
+	t.logger.Warn("terminal no output watchdog", "session_id", t.sessionID, "timeout", timeout.String(), "pid", pid)
+	note := "\r\n[ocr] Attach has no output yet. SSH is still running. Check ~/.ocr/ocr.log for details.\r\n"
+	_, _ = t.emulator.Write([]byte(note))
+	t.emit(model.TerminalOutputMsg{SessionID: t.sessionID})
+
+	if pid <= 0 {
+		return
+	}
+
+	out, err := exec.Command("ps", "-o", "pid,ppid,stat,command", "-p", strconv.Itoa(pid)).CombinedOutput()
+	if err != nil {
+		t.logger.Warn("terminal no output watchdog ps failed", "session_id", t.sessionID, "pid", pid, "error", err)
+		return
+	}
+	t.logger.Warn("terminal no output watchdog process", "session_id", t.sessionID, "pid", pid, "snapshot", string(out))
 }
 
 func (t *SessionTerminal) waitLoop() {
@@ -310,9 +379,36 @@ func buildAttachRemoteCommand(host model.Host, session model.Session) string {
 
 func buildAttachSSHArgs(host model.Host, remoteCmd string, sshOpts []string) []string {
 	args := []string{"-o", attachSSHBatchMode, "-o", attachSSHTimeout}
-	args = append(args, sshOpts...)
-	args = append(args, "-t", "-t", host.Name, remoteCmd)
+	args = append(args, filterAttachSSHOpts(sshOpts)...)
+	args = append(args, "-o", "ControlMaster=no", "-S", "none", "-t", "-t", host.Name, remoteCmd)
 	return args
+}
+
+func filterAttachSSHOpts(opts []string) []string {
+	if len(opts) == 0 {
+		return nil
+	}
+	filtered := make([]string, 0, len(opts))
+	for i := 0; i < len(opts); i++ {
+		if opts[i] == "-o" && i+1 < len(opts) {
+			v := opts[i+1]
+			if strings.HasPrefix(v, "ControlMaster=") || strings.HasPrefix(v, "ControlPersist=") || strings.HasPrefix(v, "ControlPath=") {
+				i++
+				continue
+			}
+			filtered = append(filtered, "-o", v)
+			i++
+			continue
+		}
+		if opts[i] == "-S" {
+			if i+1 < len(opts) {
+				i++
+			}
+			continue
+		}
+		filtered = append(filtered, opts[i])
+	}
+	return filtered
 }
 
 func isPTYClosureError(err error) bool {
