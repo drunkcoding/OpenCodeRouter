@@ -911,7 +911,7 @@ func (m *AppModel) createSessionCmd(host model.Host, directory string) tea.Cmd {
 		bin, bin, directory,
 	)
 
-	c := exec.Command("ssh", "-t", host.Name, remoteCmd)
+	c := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-t", host.Name, remoteCmd)
 	return tea.ExecProcess(c, func(err error) tea.Msg {
 		return model.CreateSessionFinishedMsg{Err: err}
 	})
