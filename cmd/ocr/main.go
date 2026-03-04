@@ -56,6 +56,7 @@ func newRootCmd() *cobra.Command {
 
 			app := tui.NewApp(cfg, nil, nil, logger)
 			program := tea.NewProgram(app)
+			app.SetProgram(program)
 			if _, err := program.Run(); err != nil {
 				return fmt.Errorf("run tui: %w", err)
 			}

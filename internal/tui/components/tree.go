@@ -34,6 +34,7 @@ type SessionTreeView struct {
 	filterQuery       string
 	collapsedHosts    map[string]bool
 	collapsedProjects map[string]bool
+	activeSession     func(sessionID string) bool
 	rows              []treeRow
 	cursor            int
 	scroll            int
@@ -68,6 +69,10 @@ func (t *SessionTreeView) SetHosts(hosts []model.Host) {
 func (t *SessionTreeView) SetFilter(query string) {
 	t.filterQuery = strings.ToLower(strings.TrimSpace(query))
 	t.rebuild()
+}
+
+func (t *SessionTreeView) SetActiveSessionLookup(lookup func(sessionID string) bool) {
+	t.activeSession = lookup
 }
 
 // Hosts returns the currently loaded hosts.
@@ -269,7 +274,11 @@ func (t SessionTreeView) renderRow(row treeRow, selected bool) string {
 		if strings.TrimSpace(title) == "" {
 			title = s.ID
 		}
-		line = fmt.Sprintf("    • %s (%s)", title, s.Activity)
+		indicator := " "
+		if t.activeSession != nil && t.activeSession(s.ID) {
+			indicator = t.theme.Accent.Render("●")
+		}
+		line = fmt.Sprintf("    %s • %s (%s)", indicator, title, s.Activity)
 		line = t.theme.TreeSession.Render(line)
 	}
 

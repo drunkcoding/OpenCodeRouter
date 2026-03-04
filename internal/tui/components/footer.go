@@ -17,10 +17,18 @@ type FooterContext struct {
 	ErrorDetailActive bool
 }
 
+type FooterMode int
+
+const (
+	FooterModeTree FooterMode = iota
+	FooterModeTerminal
+)
+
 // FooterHelpBar renders keybinding hints.
 type FooterHelpBar struct {
 	keyMap  keys.KeyMap
 	context FooterContext
+	mode    FooterMode
 	width   int
 	theme   theme.Theme
 }
@@ -40,10 +48,16 @@ func (f *FooterHelpBar) SetContext(ctx FooterContext) {
 	f.context = ctx
 }
 
+func (f *FooterHelpBar) SetMode(mode FooterMode) {
+	f.mode = mode
+}
+
 // View renders the footer help line.
 func (f FooterHelpBar) View() string {
 	hints := make([]keys.Binding, 0, 8)
-	if f.context.ModalOpen {
+	if f.mode == FooterModeTerminal {
+		hints = append(hints, f.keyMap.Detach)
+	} else if f.context.ModalOpen {
 		hints = append(hints, f.keyMap.Close)
 	} else if f.context.SearchFocus {
 		hints = append(hints, keys.Binding{Key: "esc", Description: "blur"})

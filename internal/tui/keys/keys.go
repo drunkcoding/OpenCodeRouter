@@ -16,6 +16,7 @@ type Binding struct {
 // KeyMap is the complete set of runtime bindings used by the TUI.
 type KeyMap struct {
 	Attach       Binding
+	Detach       Binding
 	Search       Binding
 	Refresh      Binding
 	Quit         Binding
@@ -38,6 +39,7 @@ type KeyMap struct {
 // NewKeyMap builds key bindings from loaded config values.
 func NewKeyMap(cfg config.KeybindingsConfig) KeyMap {
 	attach := firstNonEmpty(cfg.Attach, "enter")
+	detach := firstNonEmpty(cfg.Detach, "ctrl+]")
 	search := firstNonEmpty(cfg.Search, "/")
 	refresh := firstNonEmpty(cfg.Refresh, "r")
 	quit := firstNonEmpty(cfg.Quit, "q")
@@ -51,6 +53,7 @@ func NewKeyMap(cfg config.KeybindingsConfig) KeyMap {
 
 	return KeyMap{
 		Attach:       Binding{Key: attach, Description: "attach"},
+		Detach:       Binding{Key: detach, Description: "detach"},
 		Search:       Binding{Key: search, Description: "search"},
 		Refresh:      Binding{Key: refresh, Description: "refresh"},
 		Quit:         Binding{Key: quit, Description: "quit"},
@@ -77,14 +80,14 @@ func Matches(pressed string, binding Binding) bool {
 
 // ShortHelp returns compact bindings suitable for footer rendering.
 func (k KeyMap) ShortHelp() []Binding {
-	return []Binding{k.Search, k.Refresh, k.Authenticate, k.NewSession, k.GitClone, k.Attach, k.Quit}
+	return []Binding{k.Search, k.Refresh, k.Authenticate, k.NewSession, k.GitClone, k.Attach, k.Detach, k.Quit}
 }
 
 // FullHelp returns grouped bindings for expanded help views.
 func (k KeyMap) FullHelp() [][]Binding {
 	return [][]Binding{
 		{k.Search, k.Refresh, k.CycleView, k.Quit},
-		{k.Up, k.Down, k.Toggle, k.Attach, k.Inspect},
+		{k.Up, k.Down, k.Toggle, k.Attach, k.Detach, k.Inspect},
 		{k.NewSession, k.KillSession, k.GitClone, k.Authenticate, k.ErrorDetail, k.Collapse, k.Expand, k.Close},
 	}
 }

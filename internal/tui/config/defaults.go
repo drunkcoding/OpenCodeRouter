@@ -60,6 +60,7 @@ func DefaultConfig() Config {
 		},
 		Keybindings: KeybindingsConfig{
 			Attach:       "enter",
+			Detach:       "ctrl+]",
 			Search:       "/",
 			Refresh:      "r",
 			Quit:         "q",

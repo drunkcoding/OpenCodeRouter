@@ -87,3 +87,13 @@ type KillSessionFinishedMsg struct {
 type GitCloneFinishedMsg struct {
 	Err error
 }
+
+type TerminalOutputMsg struct {
+	SessionID string
+	Data      []byte
+}
+
+type TerminalClosedMsg struct {
+	SessionID string
+	Err       error
+}

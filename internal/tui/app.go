@@ -10,6 +10,7 @@ import (
 	"path"
 	"strings"
 	"time"
+	"unicode"
 
 	"opencoderouter/internal/tui/components"
 	"opencoderouter/internal/tui/config"
@@ -17,6 +18,7 @@ import (
 	"opencoderouter/internal/tui/keys"
 	"opencoderouter/internal/tui/model"
 	"opencoderouter/internal/tui/probe"
+	"opencoderouter/internal/tui/session"
 	"opencoderouter/internal/tui/theme"
 
 	tea "charm.land/bubbletea/v2"
@@ -33,12 +35,28 @@ type Prober interface {
 	ProbeHosts(ctx context.Context, hosts []model.Host) ([]model.Host, error)
 }
 
+type appView int
+
+const (
+	viewTree appView = iota
+	viewTerminal
+)
+
+type terminalSessionManager interface {
+	Attach(host model.Host, session model.Session, width, height int) (session.Terminal, error)
+	Get(sessionID string) session.Terminal
+	ResizeAll(width, height int)
+	Shutdown()
+	CleanupClosed()
+}
+
 // AppModel is the top-level Bubble Tea model for opencode-remote.
 type AppModel struct {
-	cfg    config.Config
-	theme  theme.Theme
-	keys   keys.KeyMap
-	logger *slog.Logger
+	cfg     config.Config
+	theme   theme.Theme
+	keys    keys.KeyMap
+	logger  *slog.Logger
+	program *tea.Program
 
 	discovery Discoverer
 	prober    Prober
@@ -57,6 +75,10 @@ type AppModel struct {
 	width       int
 	height      int
 	showInspect bool
+
+	activeView      appView
+	activeSessionID string
+	sessionManager  terminalSessionManager
 }
 
 const (
@@ -85,25 +107,53 @@ func NewApp(cfg config.Config, discoverer Discoverer, proberSvc Prober, logger *
 	}
 
 	app := &AppModel{
-		cfg:         cfg,
-		theme:       th,
-		keys:        keyMap,
-		logger:      appLogger,
-		discovery:   discoverer,
-		prober:      proberSvc,
-		header:      components.NewHeaderBar(th, cfg.Polling.Interval),
-		tree:        components.NewSessionTreeView(th),
-		inspect:     components.NewInspectPanel(th),
-		footer:      components.NewFooterHelpBar(keyMap, th),
-		toast:       components.NewInlineToast(th),
-		modal:       components.NewModalLayer(th),
-		spinner:     components.NewBrailleSpinner(cfg.Display.Animation),
-		showInspect: true,
+		cfg:            cfg,
+		theme:          th,
+		keys:           keyMap,
+		logger:         appLogger,
+		discovery:      discoverer,
+		prober:         proberSvc,
+		header:         components.NewHeaderBar(th, cfg.Polling.Interval),
+		tree:           components.NewSessionTreeView(th),
+		inspect:        components.NewInspectPanel(th),
+		footer:         components.NewFooterHelpBar(keyMap, th),
+		toast:          components.NewInlineToast(th),
+		modal:          components.NewModalLayer(th),
+		spinner:        components.NewBrailleSpinner(cfg.Display.Animation),
+		showInspect:    true,
+		activeView:     viewTree,
+		sessionManager: session.NewManager(nil),
 	}
+	app.tree.SetActiveSessionLookup(func(sessionID string) bool {
+		if strings.TrimSpace(sessionID) == "" {
+			return false
+		}
+		terminal := app.ensureSessionManager().Get(sessionID)
+		return terminal != nil && !terminal.IsClosed()
+	})
 
 	app.header.SetStats(components.FleetStats{})
 	app.footer.SetContext(components.FooterContext{})
 	return app
+}
+
+func (m *AppModel) SetProgram(p *tea.Program) {
+	if m == nil {
+		return
+	}
+
+	m.program = p
+
+	if m.sessionManager != nil {
+		m.sessionManager.Shutdown()
+	}
+
+	if p == nil {
+		m.sessionManager = session.NewManager(nil)
+		return
+	}
+
+	m.sessionManager = session.NewManager(p.Send)
 }
 
 // Init starts animation and the first refresh cycle.
@@ -131,6 +181,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch typed := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.resize(typed.Width, typed.Height)
+		m.ensureSessionManager().ResizeAll(typed.Width, typed.Height)
 
 	case components.SpinnerTickMsg:
 		var cmd tea.Cmd
@@ -152,6 +203,30 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logger.Debug("update message", "message_type", "ProbeResultMsg", "hosts", len(typed.Hosts), "has_error", typed.Err != nil)
 		if toastCmd := m.applyProbeResult(typed); toastCmd != nil {
 			cmds = append(cmds, toastCmd)
+		}
+
+	case model.TerminalOutputMsg:
+		if typed.SessionID == m.activeSessionID {
+			m.logger.Debug("terminal output", "session_id", typed.SessionID, "bytes", len(typed.Data))
+		}
+
+	case model.TerminalClosedMsg:
+		m.logger.Info("terminal closed", "session_id", typed.SessionID, "active_session_id", m.activeSessionID, "has_error", typed.Err != nil)
+		m.ensureSessionManager().CleanupClosed()
+		if typed.SessionID == m.activeSessionID {
+			m.activeView = viewTree
+			m.activeSessionID = ""
+			if typed.Err != nil {
+				if toastCmd := m.showErrorToast(fmt.Errorf("session disconnected: %w", typed.Err)); toastCmd != nil {
+					cmds = append(cmds, toastCmd)
+				}
+			} else {
+				toastCmd := m.toast.Show("Session disconnected", components.ToastSeverityWarning, errorToastTimeout)
+				if toastCmd != nil {
+					cmds = append(cmds, toastCmd)
+				}
+				m.resize(m.width, m.height)
+			}
 		}
 
 	case model.AttachFinishedMsg:
@@ -231,6 +306,42 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.refreshCmd())
 
 	case tea.KeyPressMsg:
+		if m.activeView == viewTerminal {
+			if keys.Matches(typed.String(), m.keys.Detach) || isCanonicalCtrlRightBracket(typed) {
+				m.logger.Debug("update message", "message_type", "KeyPressMsg", "category", "detach")
+				m.activeView = viewTree
+				m.activeSessionID = ""
+				m.syncFooterContext()
+				return m, nil
+			}
+
+			terminal := m.activeTerminal()
+			if terminal == nil {
+				m.logger.Info("active terminal missing, returning to tree", "session_id", m.activeSessionID)
+				m.activeView = viewTree
+				m.activeSessionID = ""
+				m.syncFooterContext()
+				return m, nil
+			}
+
+			if data := extractKeyBytes(typed); len(data) > 0 {
+				if err := terminal.WriteInput(data); err != nil {
+					m.logger.Error("terminal input forwarding failed", "session_id", m.activeSessionID, "error", sanitizeError(err))
+					m.ensureSessionManager().CleanupClosed()
+					if m.activeTerminal() == nil {
+						m.activeView = viewTree
+						m.activeSessionID = ""
+					}
+					if toastCmd := m.showErrorToast(err); toastCmd != nil {
+						cmds = append(cmds, toastCmd)
+					}
+				}
+			}
+
+			m.syncFooterContext()
+			return m, tea.Batch(cmds...)
+		}
+
 		keyCategory := ""
 		if m.modal.Active() {
 			var modalCmd tea.Cmd
@@ -245,6 +356,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case keys.Matches(typed.String(), m.keys.Quit):
 			m.logger.Debug("update message", "message_type", "KeyPressMsg", "category", "quit")
+			m.ensureSessionManager().Shutdown()
 			return m, tea.Quit
 		case keys.Matches(typed.String(), m.keys.Refresh):
 			keyCategory = "refresh"
@@ -285,7 +397,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			keyCategory = "attach"
 			host, _, session, ok := m.tree.Selected()
 			if ok && host != nil && session != nil {
-				cmds = append(cmds, m.attachCmd(*host, *session))
+				if err := m.attachSession(*host, *session); err != nil {
+					m.logger.Error("session attach failed", "host", host.Name, "session_id", session.ID, "error", sanitizeError(err))
+					if toastCmd := m.showErrorToast(err); toastCmd != nil {
+						cmds = append(cmds, toastCmd)
+					}
+				}
 			}
 		case keys.Matches(typed.String(), m.keys.Authenticate):
 			keyCategory = "authenticate"
@@ -336,6 +453,18 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the composed TUI.
 func (m *AppModel) View() tea.View {
+	if m.activeView == viewTerminal {
+		if terminal := m.activeTerminal(); terminal != nil {
+			v := tea.NewView(terminal.View())
+			v.AltScreen = true
+			return v
+		}
+
+		m.activeView = viewTree
+		m.activeSessionID = ""
+		m.syncFooterContext()
+	}
+
 	header := m.header.View(time.Now(), m.theme.Spinner.Render(m.spinner.Frame()))
 	left := m.tree.View()
 
@@ -571,31 +700,176 @@ func (m *AppModel) getMultiHopBootstrapCmds(host model.Host) []string {
 	return cmds
 }
 
-func (m *AppModel) attachCmd(host model.Host, session model.Session) tea.Cmd {
-	m.logger.Info("attach initiated", "host", host.Name, "project", session.Project, "session_id", session.ID)
-
-	bin := host.OpencodeBin
-	if bin == "" {
-		bin = "opencode"
+func (m *AppModel) ensureSessionManager() terminalSessionManager {
+	if m.sessionManager != nil {
+		return m.sessionManager
 	}
 
-	var remoteCmd string
-	if session.Directory != "" {
-		remoteCmd = fmt.Sprintf(
-			`OC=$(command -v %s 2>/dev/null || echo "$HOME/.opencode/bin/%s"); cd %s && exec "$OC" -s %s`,
-			bin, bin, session.Directory, session.ID,
-		)
+	if m.program != nil {
+		m.sessionManager = session.NewManager(m.program.Send)
 	} else {
-		remoteCmd = fmt.Sprintf(
-			`OC=$(command -v %s 2>/dev/null || echo "$HOME/.opencode/bin/%s"); exec "$OC" -s %s`,
-			bin, bin, session.ID,
-		)
+		m.sessionManager = session.NewManager(nil)
 	}
 
-	c := exec.Command("ssh", "-t", host.Name, remoteCmd)
-	return tea.ExecProcess(c, func(err error) tea.Msg {
-		return model.AttachFinishedMsg{Err: err}
-	})
+	return m.sessionManager
+}
+
+func (m *AppModel) activeTerminal() session.Terminal {
+	if m.activeView != viewTerminal || m.activeSessionID == "" {
+		return nil
+	}
+
+	terminal := m.ensureSessionManager().Get(m.activeSessionID)
+	if terminal == nil || terminal.IsClosed() {
+		return nil
+	}
+
+	return terminal
+}
+
+func (m *AppModel) attachSession(host model.Host, sessionData model.Session) error {
+	m.logger.Info("attach initiated", "host", host.Name, "project", sessionData.Project, "session_id", sessionData.ID)
+
+	manager := m.ensureSessionManager()
+	terminal, err := manager.Attach(host, sessionData, m.width, m.height)
+	if err != nil {
+		return err
+	}
+
+	if terminal == nil || terminal.IsClosed() {
+		manager.CleanupClosed()
+		terminal, err = manager.Attach(host, sessionData, m.width, m.height)
+		if err != nil {
+			return err
+		}
+		if terminal == nil || terminal.IsClosed() {
+			return fmt.Errorf("terminal unavailable for session %s", sessionData.ID)
+		}
+	}
+
+	m.activeView = viewTerminal
+	m.activeSessionID = sessionData.ID
+	return nil
+}
+
+func extractKeyBytes(msg tea.KeyPressMsg) []byte {
+	key := msg.Key()
+
+	if key.Text != "" {
+		return prependAltModifier([]byte(key.Text), key.Mod)
+	}
+
+	if ctrlBytes, ok := controlKeyBytes(key); ok {
+		return prependAltModifier(ctrlBytes, key.Mod)
+	}
+
+	if special, ok := specialKeyBytes(key.Code); ok {
+		return prependAltModifier(special, key.Mod)
+	}
+
+	if key.Code > 0 && key.Code < 128 {
+		return prependAltModifier([]byte{byte(key.Code)}, key.Mod)
+	}
+
+	if key.Code > 0 {
+		return prependAltModifier([]byte(string(key.Code)), key.Mod)
+	}
+
+	fallback := strings.TrimSpace(msg.String())
+	if fallback == "" || strings.Contains(fallback, "+") {
+		return nil
+	}
+
+	return []byte(fallback)
+}
+
+func isCanonicalCtrlRightBracket(msg tea.KeyPressMsg) bool {
+	key := msg.Key()
+	if key.Code == 0x1d {
+		return true
+	}
+
+	return key.Mod&tea.ModCtrl != 0 && key.Code == ']'
+}
+
+func prependAltModifier(data []byte, mod tea.KeyMod) []byte {
+	if len(data) == 0 {
+		return nil
+	}
+
+	encoded := append([]byte(nil), data...)
+	if mod&tea.ModAlt != 0 {
+		encoded = append([]byte{0x1b}, encoded...)
+	}
+
+	return encoded
+}
+
+func controlKeyBytes(key tea.Key) ([]byte, bool) {
+	if key.Mod&tea.ModCtrl == 0 {
+		return nil, false
+	}
+
+	code := unicode.ToLower(key.Code)
+	if code >= 'a' && code <= 'z' {
+		return []byte{byte(code - 'a' + 1)}, true
+	}
+
+	switch code {
+	case ' ', '@':
+		return []byte{0x00}, true
+	case '[':
+		return []byte{0x1b}, true
+	case '\\':
+		return []byte{0x1c}, true
+	case ']':
+		return []byte{0x1d}, true
+	case '^':
+		return []byte{0x1e}, true
+	case '_':
+		return []byte{0x1f}, true
+	case '?':
+		return []byte{0x7f}, true
+	}
+
+	return nil, false
+}
+
+func specialKeyBytes(code rune) ([]byte, bool) {
+	switch code {
+	case tea.KeyEnter, tea.KeyKpEnter:
+		return []byte{'\r'}, true
+	case tea.KeyTab:
+		return []byte{'\t'}, true
+	case tea.KeyEscape:
+		return []byte{0x1b}, true
+	case tea.KeyBackspace:
+		return []byte{0x7f}, true
+	case tea.KeySpace:
+		return []byte{' '}, true
+	case tea.KeyUp:
+		return []byte("\x1b[A"), true
+	case tea.KeyDown:
+		return []byte("\x1b[B"), true
+	case tea.KeyRight:
+		return []byte("\x1b[C"), true
+	case tea.KeyLeft:
+		return []byte("\x1b[D"), true
+	case tea.KeyHome:
+		return []byte("\x1b[H"), true
+	case tea.KeyEnd:
+		return []byte("\x1b[F"), true
+	case tea.KeyInsert:
+		return []byte("\x1b[2~"), true
+	case tea.KeyDelete:
+		return []byte("\x1b[3~"), true
+	case tea.KeyPgUp:
+		return []byte("\x1b[5~"), true
+	case tea.KeyPgDown:
+		return []byte("\x1b[6~"), true
+	default:
+		return nil, false
+	}
 }
 
 func (m *AppModel) showErrorToast(err error) tea.Cmd {
@@ -611,6 +885,12 @@ func (m *AppModel) showErrorToast(err error) tea.Cmd {
 }
 
 func (m *AppModel) syncFooterContext() {
+	mode := components.FooterModeTree
+	if m.activeView == viewTerminal {
+		mode = components.FooterModeTerminal
+	}
+	m.footer.SetMode(mode)
+
 	m.footer.SetContext(components.FooterContext{
 		ModalOpen:         m.modal.Active(),
 		SearchFocus:       m.header.SearchFocused(),

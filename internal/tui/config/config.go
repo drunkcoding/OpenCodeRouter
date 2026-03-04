@@ -83,6 +83,7 @@ type SessionsConfig struct {
 // KeybindingsConfig defines runtime key maps.
 type KeybindingsConfig struct {
 	Attach       string `mapstructure:"attach" yaml:"attach"`
+	Detach       string `mapstructure:"detach" yaml:"detach"`
 	Search       string `mapstructure:"search" yaml:"search"`
 	Refresh      string `mapstructure:"refresh" yaml:"refresh"`
 	Quit         string `mapstructure:"quit" yaml:"quit"`
