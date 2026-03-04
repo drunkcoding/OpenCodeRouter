@@ -20,6 +20,9 @@ import (
 const (
 	defaultTerminalWidth  = 80
 	defaultTerminalHeight = 24
+	// Prevent interactive SSH prompts that cause TUI black-screen hang when auth/network fails.
+	attachSSHBatchMode = "BatchMode=yes"
+	attachSSHTimeout   = "ConnectTimeout=10"
 )
 
 var ErrSessionTerminalClosed = errors.New("session terminal is closed")
@@ -55,7 +58,7 @@ func NewSessionTerminal(host model.Host, session model.Session, width, height in
 	}
 
 	remoteCmd := buildAttachRemoteCommand(host, session)
-	cmd := exec.Command("ssh", "-t", host.Name, remoteCmd)
+	cmd := exec.Command("ssh", buildAttachSSHArgs(host, remoteCmd)...)
 	if err := ptyHandle.Start(cmd); err != nil {
 		_ = ptyHandle.Close()
 		return nil, fmt.Errorf("start ssh process in pty: %w", err)
@@ -249,6 +252,10 @@ func buildAttachRemoteCommand(host model.Host, session model.Session) string {
 		`OC=$(command -v %s 2>/dev/null || echo "$HOME/.opencode/bin/%s"); exec "$OC" -s %s`,
 		bin, bin, session.ID,
 	)
+}
+
+func buildAttachSSHArgs(host model.Host, remoteCmd string) []string {
+	return []string{"-o", attachSSHBatchMode, "-o", attachSSHTimeout, "-t", host.Name, remoteCmd}
 }
 
 func isPTYClosureError(err error) bool {
