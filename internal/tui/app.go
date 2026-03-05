@@ -1053,6 +1053,47 @@ func (m *AppModel) killSessionCmd(host model.Host, sessionID, directory string, 
 		bin, bin, quotedDirectory, quotedSessionID,
 	)
 
+	cleanupRemoteCmd := fmt.Sprintf(
+		`cd %s
+SESSION_ID=%s
+killed=0
+while IFS= read -r line; do
+  pid=$(printf '%%s\n' "$line" | awk '{print $1}')
+  cmdline=$(printf '%%s\n' "$line" | awk '{$1=""; sub(/^ +/, ""); print}')
+  if [ -z "$pid" ]; then
+    continue
+  fi
+  case "$cmdline" in
+    *opencode*)
+      if kill -15 "$pid" 2>/dev/null; then
+        killed=$((killed+1))
+      fi
+      ;;
+  esac
+done <<'EOF'
+$(ps -eo pid=,args= | grep -F -- "$SESSION_ID" || true)
+EOF
+
+remaining=0
+while IFS= read -r line; do
+  cmdline=$(printf '%%s\n' "$line" | awk '{$1=""; sub(/^ +/, ""); print}')
+  case "$cmdline" in
+    *opencode*)
+      remaining=$((remaining+1))
+      ;;
+  esac
+done <<'EOF'
+$(ps -eo pid=,args= | grep -F -- "$SESSION_ID" || true)
+EOF
+
+printf 'delete:session-grep:killed:%%s\n' "$killed"
+printf 'delete:session-grep:remaining:%%s\n' "$remaining"
+if [ "$remaining" -gt 0 ]; then
+  exit 21
+fi`,
+		quotedDirectory, quotedSessionID,
+	)
+
 	exportRemoteCmd := fmt.Sprintf(
 		`OC=$(command -v %s 2>/dev/null || echo "$HOME/.opencode/bin/%s"); cd %s && "$OC" export %s`,
 		bin, bin, quotedDirectory, quotedSessionID,
@@ -1083,6 +1124,10 @@ func (m *AppModel) killSessionCmd(host model.Host, sessionID, directory string, 
 
 		if _, err := runSSHCommand(host.Name, deleteRemoteCmd); err != nil {
 			return model.KillSessionFinishedMsg{Err: fmt.Errorf("delete session %s: %w", sessionID, err), SavedExportPath: savedExportPath}
+		}
+
+		if _, err := runSSHCommand(host.Name, cleanupRemoteCmd); err != nil {
+			return model.KillSessionFinishedMsg{Err: fmt.Errorf("verify remote session process cleanup for %s: %w", sessionID, err), SavedExportPath: savedExportPath}
 		}
 
 		return model.KillSessionFinishedMsg{SavedExportPath: savedExportPath}

@@ -187,7 +187,7 @@ for arg in "$@"; do
   remote_cmd="$arg"
 done
 
-case "${DELETE_SESSION_MOCK_MODE:-success}" in
+	case "${DELETE_SESSION_MOCK_MODE:-success}" in
   success)
     case "$remote_cmd" in
       *" session delete "*)
@@ -195,6 +195,11 @@ case "${DELETE_SESSION_MOCK_MODE:-success}" in
         ;;
       *" export "*)
         printf '{"id":"session-1","title":"example"}\n'
+        exit 0
+        ;;
+      *"delete:session-grep:remaining:"*)
+        printf 'delete:session-grep:killed:1\n'
+        printf 'delete:session-grep:remaining:0\n'
         exit 0
         ;;
     esac
@@ -209,6 +214,11 @@ case "${DELETE_SESSION_MOCK_MODE:-success}" in
         printf 'export failed\n' >&2
         exit 17
         ;;
+      *"delete:session-grep:remaining:"*)
+        printf 'delete:session-grep:killed:0\n'
+        printf 'delete:session-grep:remaining:0\n'
+        exit 0
+        ;;
     esac
     exit 0
     ;;
@@ -221,6 +231,29 @@ case "${DELETE_SESSION_MOCK_MODE:-success}" in
       *" export "*)
         printf '{"id":"session-1","title":"example"}\n'
         exit 0
+        ;;
+      *"delete:session-grep:remaining:"*)
+        printf 'delete:session-grep:killed:0\n'
+        printf 'delete:session-grep:remaining:0\n'
+        exit 0
+        ;;
+    esac
+    exit 0
+    ;;
+  cleanupfail)
+    case "$remote_cmd" in
+      *" session delete "*)
+        exit 0
+        ;;
+      *" export "*)
+        printf '{"id":"session-1","title":"example"}\n'
+        exit 0
+        ;;
+      *"delete:session-grep:remaining:"*)
+        printf 'delete:session-grep:killed:0\n'
+        printf 'delete:session-grep:remaining:1\n'
+        printf 'still running\n' >&2
+        exit 21
         ;;
     esac
     exit 0
@@ -441,8 +474,8 @@ func TestKillSessionCmd_SaveContextExportsThenDeletes(t *testing.T) {
 		t.Fatalf("read args file: %v", err)
 	}
 	argsText := string(rawArgs)
-	if strings.Count(argsText, "__CALL__") != 2 {
-		t.Fatalf("expected two ssh calls (export + delete), got %d in %q", strings.Count(argsText, "__CALL__"), argsText)
+	if strings.Count(argsText, "__CALL__") != 3 {
+		t.Fatalf("expected three ssh calls (export + delete + cleanup), got %d in %q", strings.Count(argsText, "__CALL__"), argsText)
 	}
 	if !strings.Contains(argsText, " export ") {
 		t.Fatalf("expected export command invocation, got %q", argsText)
@@ -450,8 +483,20 @@ func TestKillSessionCmd_SaveContextExportsThenDeletes(t *testing.T) {
 	if !strings.Contains(argsText, "session delete") {
 		t.Fatalf("expected delete command invocation, got %q", argsText)
 	}
+	if !strings.Contains(argsText, "delete:session-grep:remaining:") {
+		t.Fatalf("expected cleanup verification command invocation, got %q", argsText)
+	}
+	if !strings.Contains(argsText, "grep -F -- \"$SESSION_ID\"") {
+		t.Fatalf("expected cleanup grep by session id pattern, got %q", argsText)
+	}
+	if !strings.Contains(argsText, "kill -15") {
+		t.Fatalf("expected cleanup SIGTERM kill -15 pattern, got %q", argsText)
+	}
 	if strings.Index(argsText, " export ") > strings.Index(argsText, "session delete") {
 		t.Fatalf("expected export command before delete command, got %q", argsText)
+	}
+	if strings.Index(argsText, "session delete") > strings.Index(argsText, "delete:session-grep:remaining:") {
+		t.Fatalf("expected cleanup command after delete command, got %q", argsText)
 	}
 }
 
@@ -476,14 +521,17 @@ func TestKillSessionCmd_DeleteWithoutSaveSkipsExport(t *testing.T) {
 		t.Fatalf("read args file: %v", err)
 	}
 	argsText := string(rawArgs)
-	if strings.Count(argsText, "__CALL__") != 1 {
-		t.Fatalf("expected one ssh call (delete only), got %d in %q", strings.Count(argsText, "__CALL__"), argsText)
+	if strings.Count(argsText, "__CALL__") != 2 {
+		t.Fatalf("expected two ssh calls (delete + cleanup), got %d in %q", strings.Count(argsText, "__CALL__"), argsText)
 	}
 	if strings.Contains(argsText, " export ") {
 		t.Fatalf("did not expect export command invocation when save disabled, got %q", argsText)
 	}
 	if !strings.Contains(argsText, "session delete") {
 		t.Fatalf("expected delete command invocation, got %q", argsText)
+	}
+	if !strings.Contains(argsText, "delete:session-grep:remaining:") {
+		t.Fatalf("expected cleanup verification command invocation, got %q", argsText)
 	}
 }
 
@@ -517,6 +565,9 @@ func TestKillSessionCmd_SaveContextExportFailureStopsDelete(t *testing.T) {
 	}
 	if strings.Contains(argsText, "session delete") {
 		t.Fatalf("delete command should not run after export failure, got %q", argsText)
+	}
+	if strings.Contains(argsText, "delete:session-grep:remaining:") {
+		t.Fatalf("cleanup command should not run after export failure, got %q", argsText)
 	}
 }
 
@@ -554,6 +605,42 @@ func TestKillSessionCmd_DeleteFailureReturnsSavedExportPath(t *testing.T) {
 	}
 	if !strings.Contains(argsText, " export ") || !strings.Contains(argsText, "session delete") {
 		t.Fatalf("expected both export and delete invocations, got %q", argsText)
+	}
+	if strings.Contains(argsText, "delete:session-grep:remaining:") {
+		t.Fatalf("cleanup command should not run when delete fails, got %q", argsText)
+	}
+}
+
+func TestKillSessionCmd_CleanupFailureReturnsSavedExportPath(t *testing.T) {
+	app := NewApp(config.DefaultConfig(), fakeDiscoverer{}, fakeProber{}, nil)
+	host, argsFile := setupDeleteSessionMockSSH(t, "cleanupfail")
+	t.Setenv("HOME", t.TempDir())
+
+	msg := app.killSessionCmd(host, "session-1", "/tmp/project-alpha", true)()
+	finished, ok := msg.(model.KillSessionFinishedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want model.KillSessionFinishedMsg", msg)
+	}
+	if finished.Err == nil {
+		t.Fatal("Err = nil, want cleanup verification error")
+	}
+	if !strings.Contains(strings.ToLower(finished.Err.Error()), "verify remote session process cleanup") {
+		t.Fatalf("expected cleanup verification error context, got %q", finished.Err.Error())
+	}
+	if strings.TrimSpace(finished.SavedExportPath) == "" {
+		t.Fatal("expected SavedExportPath when cleanup fails after successful export")
+	}
+
+	rawArgs, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read args file: %v", err)
+	}
+	argsText := string(rawArgs)
+	if strings.Count(argsText, "__CALL__") != 3 {
+		t.Fatalf("expected three ssh calls when cleanup fails, got %d in %q", strings.Count(argsText, "__CALL__"), argsText)
+	}
+	if !strings.Contains(argsText, " export ") || !strings.Contains(argsText, "session delete") || !strings.Contains(argsText, "delete:session-grep:remaining:") {
+		t.Fatalf("expected export, delete, and cleanup invocations, got %q", argsText)
 	}
 }
 
