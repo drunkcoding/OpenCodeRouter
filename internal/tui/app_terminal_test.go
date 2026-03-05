@@ -264,6 +264,7 @@ func newTerminalIntegrationApp(t *testing.T) (*AppModel, *fakeAppSessionManager,
 	app.tree.SetHosts(app.hosts)
 
 	_, _ = app.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	_, _ = app.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 	_, _ = app.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 
 	return app, manager, host, sessionData

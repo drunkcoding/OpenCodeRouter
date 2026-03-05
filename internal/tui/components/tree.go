@@ -181,7 +181,7 @@ func (t *SessionTreeView) rebuild() {
 			continue
 		}
 		hostKey := host.Name
-		hostCollapsed := t.collapsedHosts[hostKey]
+		hostCollapsed := t.isHostCollapsed(hostKey)
 		t.rows = append(t.rows, treeRow{kind: treeNodeHost, hostIdx: hi, projectIdx: -1, sessionIdx: -1, hostCollapsed: hostCollapsed})
 		if hostCollapsed {
 			continue
@@ -191,8 +191,7 @@ func (t *SessionTreeView) rebuild() {
 			if !projectMatchesQuery(host, project, query) {
 				continue
 			}
-			projectKey := makeProjectKey(host.Name, project.Name)
-			projectCollapsed := t.collapsedProjects[projectKey]
+			projectCollapsed := t.isProjectCollapsed(host.Name, project.Name)
 			t.rows = append(t.rows, treeRow{kind: treeNodeProject, hostIdx: hi, projectIdx: pi, sessionIdx: -1, projCollapsed: projectCollapsed})
 			if projectCollapsed {
 				continue
@@ -223,7 +222,7 @@ func (t SessionTreeView) renderRow(row treeRow, selected bool) string {
 	switch row.kind {
 	case treeNodeHost:
 		glyph := "▾"
-		if t.collapsedHosts[h.Name] {
+		if t.isHostCollapsed(h.Name) {
 			glyph = "▸"
 		}
 		status := string(h.Status)
@@ -262,7 +261,7 @@ func (t SessionTreeView) renderRow(row treeRow, selected bool) string {
 	case treeNodeProject:
 		p := h.Projects[row.projectIdx]
 		glyph := "▾"
-		if t.collapsedProjects[makeProjectKey(h.Name, p.Name)] {
+		if t.isProjectCollapsed(h.Name, p.Name) {
 			glyph = "▸"
 		}
 		line = fmt.Sprintf("  %s %s", glyph, p.Name)
@@ -296,12 +295,12 @@ func (t *SessionTreeView) toggleAtCursor() {
 	switch row.kind {
 	case treeNodeHost:
 		hostName := t.hosts[row.hostIdx].Name
-		t.collapsedHosts[hostName] = !t.collapsedHosts[hostName]
+		t.collapsedHosts[hostName] = !t.isHostCollapsed(hostName)
 	case treeNodeProject:
 		h := t.hosts[row.hostIdx]
 		p := h.Projects[row.projectIdx]
 		projectKey := makeProjectKey(h.Name, p.Name)
-		t.collapsedProjects[projectKey] = !t.collapsedProjects[projectKey]
+		t.collapsedProjects[projectKey] = !t.isProjectCollapsed(h.Name, p.Name)
 	}
 	t.rebuild()
 }
@@ -362,6 +361,23 @@ func (t *SessionTreeView) clampScroll() {
 
 func makeProjectKey(host, project string) string {
 	return host + "::" + project
+}
+
+func (t *SessionTreeView) isHostCollapsed(host string) bool {
+	collapsed, ok := t.collapsedHosts[host]
+	if !ok {
+		return false
+	}
+	return collapsed
+}
+
+func (t *SessionTreeView) isProjectCollapsed(host, project string) bool {
+	projectKey := makeProjectKey(host, project)
+	collapsed, ok := t.collapsedProjects[projectKey]
+	if !ok {
+		return true
+	}
+	return collapsed
 }
 
 func hostMatchesQuery(host model.Host, query string) bool {

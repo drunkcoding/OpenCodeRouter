@@ -82,18 +82,19 @@ type SessionsConfig struct {
 
 // KeybindingsConfig defines runtime key maps.
 type KeybindingsConfig struct {
-	Attach       string `mapstructure:"attach" yaml:"attach"`
-	Detach       string `mapstructure:"detach" yaml:"detach"`
-	Search       string `mapstructure:"search" yaml:"search"`
-	Refresh      string `mapstructure:"refresh" yaml:"refresh"`
-	Quit         string `mapstructure:"quit" yaml:"quit"`
-	NewSession   string `mapstructure:"new_session" yaml:"new_session"`
-	KillSession  string `mapstructure:"kill_session" yaml:"kill_session"`
-	GitClone     string `mapstructure:"git_clone" yaml:"git_clone"`
-	Inspect      string `mapstructure:"inspect" yaml:"inspect"`
-	CycleView    string `mapstructure:"cycle_view" yaml:"cycle_view"`
-	Authenticate string `mapstructure:"authenticate" yaml:"authenticate"`
-	ErrorDetail  string `mapstructure:"error_detail" yaml:"error_detail"`
+	Attach         string `mapstructure:"attach" yaml:"attach"`
+	Detach         string `mapstructure:"detach" yaml:"detach"`
+	Search         string `mapstructure:"search" yaml:"search"`
+	Refresh        string `mapstructure:"refresh" yaml:"refresh"`
+	Quit           string `mapstructure:"quit" yaml:"quit"`
+	NewSession     string `mapstructure:"new_session" yaml:"new_session"`
+	KillSession    string `mapstructure:"kill_session" yaml:"kill_session"`
+	ReloadSessions string `mapstructure:"reload_sessions" yaml:"reload_sessions"`
+	GitClone       string `mapstructure:"git_clone" yaml:"git_clone"`
+	Inspect        string `mapstructure:"inspect" yaml:"inspect"`
+	CycleView      string `mapstructure:"cycle_view" yaml:"cycle_view"`
+	Authenticate   string `mapstructure:"authenticate" yaml:"authenticate"`
+	ErrorDetail    string `mapstructure:"error_detail" yaml:"error_detail"`
 }
 
 // Load reads YAML config from disk and merges it onto defaults.
