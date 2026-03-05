@@ -20,4 +20,22 @@ func TestReloadMessagesCompileCoverage(t *testing.T) {
 	if finished.HostName != "host-a" || finished.Directory != "/srv/project" || finished.KilledCount != 3 {
 		t.Fatalf("unexpected finished payload: %#v", finished)
 	}
+
+	killConfirm := ModalConfirmKillMsg{
+		HostName:    "host-a",
+		SessionID:   "session-1",
+		Directory:   "/srv/project",
+		SaveContext: true,
+	}
+	if killConfirm.SessionID != "session-1" || !killConfirm.SaveContext {
+		t.Fatalf("unexpected kill confirm payload: %#v", killConfirm)
+	}
+
+	killFinished := KillSessionFinishedMsg{
+		Err:             nil,
+		SavedExportPath: "/tmp/export.json",
+	}
+	if killFinished.SavedExportPath != "/tmp/export.json" {
+		t.Fatalf("unexpected kill finished payload: %#v", killFinished)
+	}
 }

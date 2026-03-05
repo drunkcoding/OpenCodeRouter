@@ -75,7 +75,7 @@ func (p InspectPanel) View() string {
 		fmt.Sprintf("Messages: %d", p.session.MessageCount),
 		fmt.Sprintf("Agents: %s", nonEmpty(strings.Join(p.session.Agents, ", "), "(none)")),
 		"",
-		"Actions: Enter attach • n new session • d kill • g clone",
+		"Actions: Enter attach • n new session • d delete • g clone",
 	}
 
 	body := strings.Join(lines, "\n")

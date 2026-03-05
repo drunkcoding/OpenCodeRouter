@@ -60,7 +60,7 @@ func NewKeyMap(cfg config.KeybindingsConfig) KeyMap {
 		Refresh:        Binding{Key: refresh, Description: "refresh"},
 		Quit:           Binding{Key: quit, Description: "quit"},
 		NewSession:     Binding{Key: newSession, Description: "new"},
-		KillSession:    Binding{Key: killSession, Description: "kill"},
+		KillSession:    Binding{Key: killSession, Description: "delete"},
 		ReloadSessions: Binding{Key: reloadSessions, Description: "reload"},
 		GitClone:       Binding{Key: gitClone, Description: "clone"},
 		Inspect:        Binding{Key: inspect, Description: "inspect"},

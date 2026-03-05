@@ -163,6 +163,86 @@ esac
 	return model.Host{Name: "mock-host"}, argsFile
 }
 
+func setupDeleteSessionMockSSH(t *testing.T, mode string) (model.Host, string) {
+	t.Helper()
+
+	binDir := t.TempDir()
+	argsFile := filepath.Join(t.TempDir(), "ssh-delete-args.txt")
+	sshPath := filepath.Join(binDir, "ssh")
+
+	sshScript := `#!/bin/sh
+set -eu
+
+if [ -n "${DELETE_SESSION_ARGS_FILE:-}" ]; then
+  {
+    printf '__CALL__\n'
+    for arg in "$@"; do
+      printf '%s\n' "$arg"
+    done
+  } >>"$DELETE_SESSION_ARGS_FILE"
+fi
+
+remote_cmd=""
+for arg in "$@"; do
+  remote_cmd="$arg"
+done
+
+case "${DELETE_SESSION_MOCK_MODE:-success}" in
+  success)
+    case "$remote_cmd" in
+      *" session delete "*)
+        exit 0
+        ;;
+      *" export "*)
+        printf '{"id":"session-1","title":"example"}\n'
+        exit 0
+        ;;
+    esac
+    exit 0
+    ;;
+  exportfail)
+    case "$remote_cmd" in
+      *" session delete "*)
+        exit 0
+        ;;
+      *" export "*)
+        printf 'export failed\n' >&2
+        exit 17
+        ;;
+    esac
+    exit 0
+    ;;
+  deletefail)
+    case "$remote_cmd" in
+      *" session delete "*)
+        printf 'delete failed\n' >&2
+        exit 19
+        ;;
+      *" export "*)
+        printf '{"id":"session-1","title":"example"}\n'
+        exit 0
+        ;;
+    esac
+    exit 0
+    ;;
+  *)
+    printf 'unsupported mode %s\n' "${DELETE_SESSION_MOCK_MODE:-}" >&2
+    exit 9
+    ;;
+esac
+`
+
+	if err := os.WriteFile(sshPath, []byte(sshScript), 0o755); err != nil {
+		t.Fatalf("write mock ssh: %v", err)
+	}
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DELETE_SESSION_MOCK_MODE", mode)
+	t.Setenv("DELETE_SESSION_ARGS_FILE", argsFile)
+
+	return model.Host{Name: "mock-host"}, argsFile
+}
+
 func TestReloadSessionsCmd_Success(t *testing.T) {
 	app := NewApp(config.DefaultConfig(), fakeDiscoverer{}, fakeProber{}, nil)
 	host, argsFile := setupReloadSessionsMockSSH(t, "success")
@@ -328,6 +408,152 @@ func TestReloadSessionsCmd_PermissionDenied(t *testing.T) {
 	}
 	if finished.KilledCount != 0 {
 		t.Fatalf("KilledCount = %d, want 0", finished.KilledCount)
+	}
+}
+
+func TestKillSessionCmd_SaveContextExportsThenDeletes(t *testing.T) {
+	app := NewApp(config.DefaultConfig(), fakeDiscoverer{}, fakeProber{}, nil)
+	host, argsFile := setupDeleteSessionMockSSH(t, "success")
+	t.Setenv("HOME", t.TempDir())
+
+	msg := app.killSessionCmd(host, "session-1", "/tmp/project-alpha", true)()
+	finished, ok := msg.(model.KillSessionFinishedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want model.KillSessionFinishedMsg", msg)
+	}
+	if finished.Err != nil {
+		t.Fatalf("Err = %v, want nil", finished.Err)
+	}
+	if strings.TrimSpace(finished.SavedExportPath) == "" {
+		t.Fatal("expected SavedExportPath when save context is enabled")
+	}
+
+	exportJSON, err := os.ReadFile(finished.SavedExportPath)
+	if err != nil {
+		t.Fatalf("read saved export: %v", err)
+	}
+	if !strings.Contains(string(exportJSON), "\"id\":\"session-1\"") {
+		t.Fatalf("unexpected saved export payload: %q", string(exportJSON))
+	}
+
+	rawArgs, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read args file: %v", err)
+	}
+	argsText := string(rawArgs)
+	if strings.Count(argsText, "__CALL__") != 2 {
+		t.Fatalf("expected two ssh calls (export + delete), got %d in %q", strings.Count(argsText, "__CALL__"), argsText)
+	}
+	if !strings.Contains(argsText, " export ") {
+		t.Fatalf("expected export command invocation, got %q", argsText)
+	}
+	if !strings.Contains(argsText, "session delete") {
+		t.Fatalf("expected delete command invocation, got %q", argsText)
+	}
+	if strings.Index(argsText, " export ") > strings.Index(argsText, "session delete") {
+		t.Fatalf("expected export command before delete command, got %q", argsText)
+	}
+}
+
+func TestKillSessionCmd_DeleteWithoutSaveSkipsExport(t *testing.T) {
+	app := NewApp(config.DefaultConfig(), fakeDiscoverer{}, fakeProber{}, nil)
+	host, argsFile := setupDeleteSessionMockSSH(t, "success")
+
+	msg := app.killSessionCmd(host, "session-1", "/tmp/project-alpha", false)()
+	finished, ok := msg.(model.KillSessionFinishedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want model.KillSessionFinishedMsg", msg)
+	}
+	if finished.Err != nil {
+		t.Fatalf("Err = %v, want nil", finished.Err)
+	}
+	if finished.SavedExportPath != "" {
+		t.Fatalf("SavedExportPath = %q, want empty when save disabled", finished.SavedExportPath)
+	}
+
+	rawArgs, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read args file: %v", err)
+	}
+	argsText := string(rawArgs)
+	if strings.Count(argsText, "__CALL__") != 1 {
+		t.Fatalf("expected one ssh call (delete only), got %d in %q", strings.Count(argsText, "__CALL__"), argsText)
+	}
+	if strings.Contains(argsText, " export ") {
+		t.Fatalf("did not expect export command invocation when save disabled, got %q", argsText)
+	}
+	if !strings.Contains(argsText, "session delete") {
+		t.Fatalf("expected delete command invocation, got %q", argsText)
+	}
+}
+
+func TestKillSessionCmd_SaveContextExportFailureStopsDelete(t *testing.T) {
+	app := NewApp(config.DefaultConfig(), fakeDiscoverer{}, fakeProber{}, nil)
+	host, argsFile := setupDeleteSessionMockSSH(t, "exportfail")
+	t.Setenv("HOME", t.TempDir())
+
+	msg := app.killSessionCmd(host, "session-1", "/tmp/project-alpha", true)()
+	finished, ok := msg.(model.KillSessionFinishedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want model.KillSessionFinishedMsg", msg)
+	}
+	if finished.Err == nil {
+		t.Fatal("Err = nil, want export error")
+	}
+	if !strings.Contains(strings.ToLower(finished.Err.Error()), "export session") {
+		t.Fatalf("expected export error context, got %q", finished.Err.Error())
+	}
+	if finished.SavedExportPath != "" {
+		t.Fatalf("SavedExportPath = %q, want empty on export failure", finished.SavedExportPath)
+	}
+
+	rawArgs, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read args file: %v", err)
+	}
+	argsText := string(rawArgs)
+	if strings.Count(argsText, "__CALL__") != 1 {
+		t.Fatalf("expected one ssh call when export fails, got %d in %q", strings.Count(argsText, "__CALL__"), argsText)
+	}
+	if strings.Contains(argsText, "session delete") {
+		t.Fatalf("delete command should not run after export failure, got %q", argsText)
+	}
+}
+
+func TestKillSessionCmd_DeleteFailureReturnsSavedExportPath(t *testing.T) {
+	app := NewApp(config.DefaultConfig(), fakeDiscoverer{}, fakeProber{}, nil)
+	host, argsFile := setupDeleteSessionMockSSH(t, "deletefail")
+	t.Setenv("HOME", t.TempDir())
+
+	msg := app.killSessionCmd(host, "session-1", "/tmp/project-alpha", true)()
+	finished, ok := msg.(model.KillSessionFinishedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want model.KillSessionFinishedMsg", msg)
+	}
+	if finished.Err == nil {
+		t.Fatal("Err = nil, want delete error")
+	}
+	if !strings.Contains(strings.ToLower(finished.Err.Error()), "delete session") {
+		t.Fatalf("expected delete error context, got %q", finished.Err.Error())
+	}
+	if strings.TrimSpace(finished.SavedExportPath) == "" {
+		t.Fatal("expected SavedExportPath when delete fails after successful export")
+	}
+
+	if _, err := os.Stat(finished.SavedExportPath); err != nil {
+		t.Fatalf("expected export file to exist despite delete failure: %v", err)
+	}
+
+	rawArgs, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read args file: %v", err)
+	}
+	argsText := string(rawArgs)
+	if strings.Count(argsText, "__CALL__") != 2 {
+		t.Fatalf("expected two ssh calls when delete fails, got %d in %q", strings.Count(argsText, "__CALL__"), argsText)
+	}
+	if !strings.Contains(argsText, " export ") || !strings.Contains(argsText, "session delete") {
+		t.Fatalf("expected both export and delete invocations, got %q", argsText)
 	}
 }
 

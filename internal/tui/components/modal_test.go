@@ -66,3 +66,82 @@ func TestModalConfirmReloadCancelClosesWithoutCmd(t *testing.T) {
 		t.Fatalf("expected modal to close on cancel")
 	}
 }
+
+func TestModalOpenConfirmKillShowsDeleteAndSavePrompt(t *testing.T) {
+	modal := NewModalLayer(theme.Minimal())
+	modal.OpenConfirmKill("host-a", "session-123", "/tmp/project-a")
+
+	if !modal.Active() {
+		t.Fatalf("expected modal to be active")
+	}
+	if modal.Type() != ModalTypeConfirmKill {
+		t.Fatalf("expected modal type %q, got %q", ModalTypeConfirmKill, modal.Type())
+	}
+
+	view := modal.View()
+	for _, want := range []string{"Delete Session", "session-123", "Save session context", "y save + delete", "n delete only"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected modal view to contain %q, got %q", want, view)
+		}
+	}
+}
+
+func TestModalConfirmKillYesEmitsSaveContextTrue(t *testing.T) {
+	modal := NewModalLayer(theme.Minimal())
+	modal.OpenConfirmKill("host-a", "session-123", "/tmp/project-a")
+
+	next, cmd := modal.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	if cmd == nil {
+		t.Fatalf("expected confirm cmd")
+	}
+	if next.Active() {
+		t.Fatalf("expected modal to close after confirmation")
+	}
+
+	msg := cmd()
+	confirm, ok := msg.(model.ModalConfirmKillMsg)
+	if !ok {
+		t.Fatalf("expected ModalConfirmKillMsg, got %T", msg)
+	}
+	if confirm.HostName != "host-a" || confirm.SessionID != "session-123" || confirm.Directory != "/tmp/project-a" {
+		t.Fatalf("unexpected confirm payload: %#v", confirm)
+	}
+	if !confirm.SaveContext {
+		t.Fatalf("expected SaveContext to be true for y-confirm")
+	}
+}
+
+func TestModalConfirmKillNoEmitsSaveContextFalse(t *testing.T) {
+	modal := NewModalLayer(theme.Minimal())
+	modal.OpenConfirmKill("host-a", "session-123", "/tmp/project-a")
+
+	next, cmd := modal.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	if cmd == nil {
+		t.Fatalf("expected delete-without-save cmd")
+	}
+	if next.Active() {
+		t.Fatalf("expected modal to close after selection")
+	}
+
+	msg := cmd()
+	confirm, ok := msg.(model.ModalConfirmKillMsg)
+	if !ok {
+		t.Fatalf("expected ModalConfirmKillMsg, got %T", msg)
+	}
+	if confirm.SaveContext {
+		t.Fatalf("expected SaveContext to be false for n-confirm")
+	}
+}
+
+func TestModalConfirmKillEscCancelsWithoutCmd(t *testing.T) {
+	modal := NewModalLayer(theme.Minimal())
+	modal.OpenConfirmKill("host-a", "session-123", "/tmp/project-a")
+
+	next, cmd := modal.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if cmd != nil {
+		t.Fatalf("expected no cmd on esc cancel")
+	}
+	if next.Active() {
+		t.Fatalf("expected modal to close on esc")
+	}
+}

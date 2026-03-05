@@ -66,11 +66,12 @@ type ModalConfirmGitCloneMsg struct {
 	GitURL   string
 }
 
-// ModalConfirmKillMsg is emitted when the user confirms session kill/archive.
+// ModalConfirmKillMsg is emitted when the user confirms session deletion.
 type ModalConfirmKillMsg struct {
-	HostName  string
-	SessionID string
-	Directory string
+	HostName    string
+	SessionID   string
+	Directory   string
+	SaveContext bool
 }
 
 // ModalConfirmReloadMsg is emitted when the user confirms sessions reload.
@@ -84,9 +85,10 @@ type CreateSessionFinishedMsg struct {
 	Err error
 }
 
-// KillSessionFinishedMsg is returned when background SSH session kill completes.
+// KillSessionFinishedMsg is returned when background SSH session delete completes.
 type KillSessionFinishedMsg struct {
-	Err error
+	Err             error
+	SavedExportPath string
 }
 
 // ReloadSessionsFinishedMsg is returned when background reload command completes.

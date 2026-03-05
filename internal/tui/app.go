@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
@@ -279,7 +280,15 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case model.ModalConfirmKillMsg:
 		if host := m.findHostByName(typed.HostName); host != nil {
-			cmds = append(cmds, m.killSessionCmd(*host, typed.SessionID, typed.Directory))
+			if manager := m.ensureSessionManager(); manager.Get(typed.SessionID) != nil {
+				manager.Remove(typed.SessionID)
+			}
+			if typed.SessionID == m.activeSessionID {
+				m.activeView = viewTree
+				m.activeSessionID = ""
+				m.syncFooterContext()
+			}
+			cmds = append(cmds, m.killSessionCmd(*host, typed.SessionID, typed.Directory, typed.SaveContext))
 		}
 
 	case model.ModalConfirmReloadMsg:
@@ -314,15 +323,24 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case model.KillSessionFinishedMsg:
 		if typed.Err != nil {
-			m.logger.Info("kill session finished", "status", "error")
-			m.logger.Error("session kill failed", "error", sanitizeError(typed.Err))
+			m.logger.Info("delete session finished", "status", "error")
+			m.logger.Error("session delete failed", "error", sanitizeError(typed.Err))
 		} else {
-			m.logger.Info("kill session finished", "status", "success")
+			m.logger.Info("delete session finished", "status", "success", "saved_export_path", typed.SavedExportPath)
 		}
 		if typed.Err != nil {
 			if toastCmd := m.showErrorToast(typed.Err); toastCmd != nil {
 				cmds = append(cmds, toastCmd)
 			}
+		} else {
+			message := "Session deleted"
+			if strings.TrimSpace(typed.SavedExportPath) != "" {
+				message = fmt.Sprintf("Session deleted (saved to %s)", typed.SavedExportPath)
+			}
+			if toastCmd := m.toast.Show(message, components.ToastSeverityInfo, errorToastTimeout); toastCmd != nil {
+				cmds = append(cmds, toastCmd)
+			}
+			m.resize(m.width, m.height)
 		}
 		cmds = append(cmds, m.refreshCmd())
 
@@ -428,7 +446,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case keys.Matches(typed.String(), m.keys.KillSession):
-			keyCategory = "kill_session"
+			keyCategory = "delete_session"
 			if host, _, session, ok := m.tree.Selected(); ok && host != nil && session != nil {
 				m.modal.OpenConfirmKill(host.Name, session.ID, session.Directory)
 			}
@@ -1019,24 +1037,131 @@ func (m *AppModel) createSessionCmd(host model.Host, directory string) tea.Cmd {
 	})
 }
 
-func (m *AppModel) killSessionCmd(host model.Host, sessionID, directory string) tea.Cmd {
-	m.logger.Info("kill session initiated", "host", host.Name, "session_id", sessionID)
+func (m *AppModel) killSessionCmd(host model.Host, sessionID, directory string, saveContext bool) tea.Cmd {
+	m.logger.Info("delete session initiated", "host", host.Name, "session_id", sessionID, "save_context", saveContext)
 
 	bin := host.OpencodeBin
 	if bin == "" {
 		bin = "opencode"
 	}
 
-	remoteCmd := fmt.Sprintf(
-		`OC=$(command -v %s 2>/dev/null || echo "$HOME/.opencode/bin/%s"); cd %s && "$OC" session archive %s`,
-		bin, bin, directory, sessionID,
+	quotedDirectory := shellQuote(directory)
+	quotedSessionID := shellQuote(sessionID)
+
+	deleteRemoteCmd := fmt.Sprintf(
+		`OC=$(command -v %s 2>/dev/null || echo "$HOME/.opencode/bin/%s"); cd %s && "$OC" session delete %s`,
+		bin, bin, quotedDirectory, quotedSessionID,
+	)
+
+	exportRemoteCmd := fmt.Sprintf(
+		`OC=$(command -v %s 2>/dev/null || echo "$HOME/.opencode/bin/%s"); cd %s && "$OC" export %s`,
+		bin, bin, quotedDirectory, quotedSessionID,
 	)
 
 	return func() tea.Msg {
-		c := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-t", host.Name, remoteCmd)
-		err := c.Run()
-		return model.KillSessionFinishedMsg{Err: err}
+		savedExportPath := ""
+
+		if saveContext {
+			exportPath, err := defaultSessionExportPath(host.Name, sessionID)
+			if err != nil {
+				return model.KillSessionFinishedMsg{Err: err}
+			}
+
+			exportJSON, err := runSSHCommand(host.Name, exportRemoteCmd)
+			if err != nil {
+				return model.KillSessionFinishedMsg{Err: fmt.Errorf("export session %s: %w", sessionID, err)}
+			}
+			if strings.TrimSpace(string(exportJSON)) == "" {
+				return model.KillSessionFinishedMsg{Err: fmt.Errorf("export session %s: empty export output", sessionID)}
+			}
+
+			if err := os.WriteFile(exportPath, exportJSON, 0o600); err != nil {
+				return model.KillSessionFinishedMsg{Err: fmt.Errorf("save export %q: %w", exportPath, err)}
+			}
+			savedExportPath = exportPath
+		}
+
+		if _, err := runSSHCommand(host.Name, deleteRemoteCmd); err != nil {
+			return model.KillSessionFinishedMsg{Err: fmt.Errorf("delete session %s: %w", sessionID, err), SavedExportPath: savedExportPath}
+		}
+
+		return model.KillSessionFinishedMsg{SavedExportPath: savedExportPath}
 	}
+}
+
+func runSSHCommand(hostName, remoteCmd string) ([]byte, error) {
+	c := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", hostName, remoteCmd)
+	output, err := c.CombinedOutput()
+	if err == nil {
+		return output, nil
+	}
+
+	trimmedOutput := strings.TrimSpace(string(output))
+	if trimmedOutput == "" {
+		return output, err
+	}
+
+	return output, fmt.Errorf("%w: %s", err, trimmedOutput)
+}
+
+func defaultSessionExportPath(hostName, sessionID string) (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	if strings.TrimSpace(homeDir) == "" {
+		return "", fmt.Errorf("resolve home directory: empty path")
+	}
+
+	exportDir := filepath.Join(homeDir, "Downloads", "opencode-session-exports")
+	if err := os.MkdirAll(exportDir, 0o755); err != nil {
+		return "", fmt.Errorf("create export directory %q: %w", exportDir, err)
+	}
+
+	hostPart := sanitizeFilenamePart(hostName)
+	sessionPart := sanitizeFilenamePart(sessionID)
+	timestamp := time.Now().Format("20060102-150405")
+	filename := fmt.Sprintf("%s-%s-%s.json", hostPart, sessionPart, timestamp)
+
+	return filepath.Join(exportDir, filename), nil
+}
+
+func sanitizeFilenamePart(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "session"
+	}
+
+	var b strings.Builder
+	b.Grow(len(trimmed))
+	for _, r := range trimmed {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+
+	sanitized := strings.Trim(b.String(), "-.")
+	if sanitized == "" {
+		return "session"
+	}
+
+	return sanitized
+}
+
+func shellQuote(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func (m *AppModel) reloadSessionsCmd(host model.Host, directory string) tea.Cmd {

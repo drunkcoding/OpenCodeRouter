@@ -115,9 +115,9 @@ func (m *ModalLayer) OpenGitClone(hostName string) {
 func (m *ModalLayer) OpenConfirmKill(hostName, sessionID, directory string) {
 	m.active = true
 	m.modalType = ModalTypeConfirmKill
-	m.title = "Kill Session"
-	m.body = fmt.Sprintf("Kill session %s on %s?", sessionID, hostName)
-	m.confirmText = "y confirm • n cancel"
+	m.title = "Delete Session"
+	m.body = fmt.Sprintf("Delete session %s on %s?\nSave session context before deleting?", sessionID, hostName)
+	m.confirmText = "y save + delete • n delete only • Esc cancel"
 	m.hostName = hostName
 	m.sessionID = sessionID
 	m.directory = directory
@@ -293,12 +293,26 @@ func (m ModalLayer) Update(msg tea.Msg) (ModalLayer, tea.Cmd) {
 				m.Close()
 				return m, func() tea.Msg {
 					return model.ModalConfirmKillMsg{
-						HostName:  hostName,
-						SessionID: sessionID,
-						Directory: directory,
+						HostName:    hostName,
+						SessionID:   sessionID,
+						Directory:   directory,
+						SaveContext: true,
 					}
 				}
-			case "n", "esc":
+			case "n":
+				hostName := m.hostName
+				sessionID := m.sessionID
+				directory := m.directory
+				m.Close()
+				return m, func() tea.Msg {
+					return model.ModalConfirmKillMsg{
+						HostName:    hostName,
+						SessionID:   sessionID,
+						Directory:   directory,
+						SaveContext: false,
+					}
+				}
+			case "esc":
 				m.Close()
 			}
 		}
