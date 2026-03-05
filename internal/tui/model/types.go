@@ -76,15 +76,18 @@ const (
 
 // Session represents a single opencode session entry.
 type Session struct {
-	ID           string
-	Project      string
-	Title        string
-	Directory    string
-	LastActivity time.Time
-	Status       SessionStatus
-	MessageCount int
-	Agents       []string
-	Activity     ActivityState
+	ID                 string
+	Project            string
+	Title              string
+	Directory          string
+	LastActivity       time.Time
+	Status             SessionStatus
+	MessageCount       int
+	Agents             []string
+	Activity           ActivityState
+	InspectLatestBlock string
+	InspectLoading     bool
+	InspectError       string
 }
 
 // JumpHop represents one hop in a ProxyJump chain.

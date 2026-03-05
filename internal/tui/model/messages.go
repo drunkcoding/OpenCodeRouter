@@ -15,6 +15,12 @@ type ProbeResultMsg struct {
 	RefreshedAt time.Time
 }
 
+type SessionInspectResultMsg struct {
+	Key     string
+	Content string
+	Err     error
+}
+
 // TickMsg drives countdown and animation updates.
 type TickMsg struct {
 	Now time.Time

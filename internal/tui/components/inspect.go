@@ -75,8 +75,23 @@ func (p InspectPanel) View() string {
 		fmt.Sprintf("Messages: %d", p.session.MessageCount),
 		fmt.Sprintf("Agents: %s", nonEmpty(strings.Join(p.session.Agents, ", "), "(none)")),
 		"",
-		"Actions: Enter attach • n new session • d kill • g clone",
+		"Latest Conversation:",
 	}
+
+	if p.session.InspectLoading {
+		lines = append(lines, p.theme.TreeMuted.Render("Loading latest conversation..."))
+	} else if strings.TrimSpace(p.session.InspectError) != "" {
+		lines = append(lines, p.theme.TreeMuted.Render("Unavailable: "+p.session.InspectError))
+	} else if strings.TrimSpace(p.session.InspectLatestBlock) != "" {
+		lines = append(lines, p.session.InspectLatestBlock)
+	} else {
+		lines = append(lines, p.theme.TreeMuted.Render("No conversation block available"))
+	}
+
+	lines = append(lines,
+		"",
+		"Actions: Enter attach • n new session • d kill • g clone",
+	)
 
 	body := strings.Join(lines, "\n")
 	if p.width > 0 {

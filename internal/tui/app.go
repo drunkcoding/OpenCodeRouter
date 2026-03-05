@@ -77,6 +77,9 @@ type AppModel struct {
 	height      int
 	showInspect bool
 
+	inspectCache    map[string]inspectCacheEntry
+	inspectInFlight map[string]struct{}
+
 	activeView      appView
 	activeSessionID string
 	sessionManager  terminalSessionManager
@@ -85,7 +88,18 @@ type AppModel struct {
 const (
 	errorToastTimeout      = 5 * time.Second
 	maxSanitizedErrorRunes = 320
+	inspectCacheTTL        = 30 * time.Second
 )
+
+type inspectCacheEntry struct {
+	Content   string
+	Err       string
+	FetchedAt time.Time
+}
+
+type inspectDetailProber interface {
+	FetchSessionInspectLatestBlock(ctx context.Context, host model.Host, session model.Session) (string, error)
+}
 
 // NewApp constructs the root model with injected services.
 func NewApp(cfg config.Config, discoverer Discoverer, proberSvc Prober, logger *slog.Logger) *AppModel {
@@ -108,22 +122,24 @@ func NewApp(cfg config.Config, discoverer Discoverer, proberSvc Prober, logger *
 	}
 
 	app := &AppModel{
-		cfg:            cfg,
-		theme:          th,
-		keys:           keyMap,
-		logger:         appLogger,
-		discovery:      discoverer,
-		prober:         proberSvc,
-		header:         components.NewHeaderBar(th, cfg.Polling.Interval),
-		tree:           components.NewSessionTreeView(th),
-		inspect:        components.NewInspectPanel(th),
-		footer:         components.NewFooterHelpBar(keyMap, th),
-		toast:          components.NewInlineToast(th),
-		modal:          components.NewModalLayer(th),
-		spinner:        components.NewBrailleSpinner(cfg.Display.Animation),
-		showInspect:    true,
-		activeView:     viewTree,
-		sessionManager: session.NewManager(nil, logger, buildSSHControlOpts(cfg.SSH)),
+		cfg:             cfg,
+		theme:           th,
+		keys:            keyMap,
+		logger:          appLogger,
+		discovery:       discoverer,
+		prober:          proberSvc,
+		header:          components.NewHeaderBar(th, cfg.Polling.Interval),
+		tree:            components.NewSessionTreeView(th),
+		inspect:         components.NewInspectPanel(th),
+		footer:          components.NewFooterHelpBar(keyMap, th),
+		toast:           components.NewInlineToast(th),
+		modal:           components.NewModalLayer(th),
+		spinner:         components.NewBrailleSpinner(cfg.Display.Animation),
+		showInspect:     true,
+		inspectCache:    make(map[string]inspectCacheEntry),
+		inspectInFlight: make(map[string]struct{}),
+		activeView:      viewTree,
+		sessionManager:  session.NewManager(nil, logger, buildSSHControlOpts(cfg.SSH)),
 	}
 	app.tree.SetActiveSessionLookup(func(sessionID string) bool {
 		if strings.TrimSpace(sessionID) == "" {
@@ -205,6 +221,21 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logger.Debug("update message", "message_type", "ProbeResultMsg", "hosts", len(typed.Hosts), "has_error", typed.Err != nil)
 		if toastCmd := m.applyProbeResult(typed); toastCmd != nil {
 			cmds = append(cmds, toastCmd)
+		}
+
+	case model.SessionInspectResultMsg:
+		if _, ok := m.inspectInFlight[typed.Key]; ok {
+			delete(m.inspectInFlight, typed.Key)
+		}
+
+		entry := inspectCacheEntry{Content: typed.Content, FetchedAt: time.Now()}
+		if typed.Err != nil {
+			entry.Err = sanitizeError(typed.Err)
+		}
+		m.inspectCache[typed.Key] = entry
+
+		if cmd := m.syncInspectSelection(); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 
 	case model.TerminalOutputMsg:
@@ -457,7 +488,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	m.tree.SetFilter(m.header.SearchQuery())
-	m.syncInspectSelection()
+	if cmd := m.syncInspectSelection(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
 	m.syncFooterContext()
 
 	return m, tea.Batch(cmds...)
@@ -584,22 +617,71 @@ func (m *AppModel) applyProbeResult(msg model.ProbeResultMsg) tea.Cmd {
 		}
 		if hasNonAuthErrors {
 			toastCmd := m.showErrorToast(msg.Err)
-			m.syncInspectSelection()
+			if inspectCmd := m.syncInspectSelection(); inspectCmd != nil {
+				return tea.Batch(toastCmd, inspectCmd)
+			}
 			return toastCmd
 		}
 	}
 
-	m.syncInspectSelection()
-	return nil
+	return m.syncInspectSelection()
 }
 
-func (m *AppModel) syncInspectSelection() {
+func (m *AppModel) syncInspectSelection() tea.Cmd {
 	host, project, session, ok := m.tree.Selected()
 	if !ok || session == nil || project == nil || host == nil {
 		m.inspect.ClearSelection()
-		return
+		return nil
 	}
-	m.inspect.SetSelection(*host, *project, *session)
+
+	decorated := *session
+	key := inspectSelectionKey(*host, *project, decorated)
+
+	if entry, ok := m.inspectCache[key]; ok {
+		if time.Since(entry.FetchedAt) <= inspectCacheTTL {
+			decorated.InspectLatestBlock = entry.Content
+			decorated.InspectError = entry.Err
+		} else {
+			delete(m.inspectCache, key)
+		}
+	}
+
+	if _, loading := m.inspectInFlight[key]; loading {
+		decorated.InspectLoading = true
+	} else if m.showInspect && strings.TrimSpace(decorated.InspectLatestBlock) == "" && strings.TrimSpace(decorated.InspectError) == "" {
+		decorated.InspectLoading = true
+		m.inspectInFlight[key] = struct{}{}
+		m.inspect.SetSelection(*host, *project, decorated)
+		return m.fetchInspectSelectionCmd(key, *host, decorated)
+	}
+
+	m.inspect.SetSelection(*host, *project, decorated)
+	return nil
+}
+
+func inspectSelectionKey(host model.Host, project model.Project, session model.Session) string {
+	return strings.Join([]string{host.Name, project.Name, session.ID, session.Directory}, "|")
+}
+
+func (m *AppModel) fetchInspectSelectionCmd(key string, host model.Host, session model.Session) tea.Cmd {
+	prober, ok := m.prober.(inspectDetailProber)
+	if !ok {
+		return func() tea.Msg {
+			return model.SessionInspectResultMsg{Key: key}
+		}
+	}
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		content, err := prober.FetchSessionInspectLatestBlock(ctx, host, session)
+		return model.SessionInspectResultMsg{
+			Key:     key,
+			Content: content,
+			Err:     err,
+		}
+	}
 }
 
 func (m *AppModel) resize(width, height int) {
