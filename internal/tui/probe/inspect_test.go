@@ -1,11 +1,36 @@
 package probe
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"opencoderouter/internal/tui/model"
 )
+
+type sequenceRunner struct {
+	outputs [][]byte
+	errs    []error
+	calls   int
+}
+
+func (r *sequenceRunner) Run(_ context.Context, _ string, _ ...string) ([]byte, error) {
+	idx := r.calls
+	r.calls++
+
+	var out []byte
+	if idx < len(r.outputs) {
+		out = r.outputs[idx]
+	}
+
+	var err error
+	if idx < len(r.errs) {
+		err = r.errs[idx]
+	}
+
+	return out, err
+}
 
 func TestExtractLatestConversationBlockText(t *testing.T) {
 	raw := []byte(`{
@@ -96,5 +121,69 @@ func TestBuildInspectRemoteCmdUsesExport(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "cd '/tmp/project'") {
 		t.Fatalf("missing directory cd: %q", cmd)
+	}
+}
+
+func TestFetchSessionInspectLatestBlockRetriesOnParseError(t *testing.T) {
+	runner := &sequenceRunner{
+		outputs: [][]byte{
+			[]byte(`{"messages":`),
+			[]byte(`{"messages":[{"info":{"role":"assistant"},"parts":[{"type":"text","text":"from retry"}]}]}`),
+		},
+	}
+
+	svc := &ProbeService{runner: runner}
+	host := model.Host{Name: "demo-host"}
+	session := model.Session{ID: "ses_retry", Directory: "/tmp/retry"}
+
+	got, err := svc.FetchSessionInspectLatestBlock(context.Background(), host, session)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "from retry" {
+		t.Fatalf("unexpected block: %q", got)
+	}
+	if runner.calls != 2 {
+		t.Fatalf("expected 2 attempts, got %d", runner.calls)
+	}
+}
+
+func TestFetchSessionInspectLatestBlockStopsAfterMaxAttempts(t *testing.T) {
+	runner := &sequenceRunner{
+		outputs: [][]byte{
+			[]byte(`{"messages":`),
+			[]byte(`{"messages":`),
+			[]byte(`{"messages":`),
+		},
+	}
+
+	svc := &ProbeService{runner: runner}
+	host := model.Host{Name: "demo-host"}
+	session := model.Session{ID: "ses_fail", Directory: "/tmp/fail"}
+
+	_, err := svc.FetchSessionInspectLatestBlock(context.Background(), host, session)
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+	if !strings.Contains(err.Error(), "parse session inspect export") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if runner.calls != inspectFetchMaxAttempts {
+		t.Fatalf("expected %d attempts, got %d", inspectFetchMaxAttempts, runner.calls)
+	}
+}
+
+func TestFetchSessionInspectLatestBlockReturnsRunnerError(t *testing.T) {
+	runner := &sequenceRunner{errs: []error{errors.New("boom")}}
+	svc := &ProbeService{runner: runner}
+	host := model.Host{Name: "demo-host"}
+	session := model.Session{ID: "ses_err", Directory: "/tmp/err"}
+
+	_, err := svc.FetchSessionInspectLatestBlock(context.Background(), host, session)
+	if err == nil {
+		t.Fatal("expected fetch error")
+	}
+	if !strings.Contains(err.Error(), "fetch session inspect export") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

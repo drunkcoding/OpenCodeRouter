@@ -8,13 +8,16 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"opencoderouter/internal/tui/model"
 )
 
 const (
-	inspectPreviewMaxLines = 12
-	inspectPreviewMaxRunes = 1800
+	inspectPreviewMaxLines  = 12
+	inspectPreviewMaxRunes  = 1800
+	inspectFetchMaxAttempts = 3
+	inspectFetchRetryDelay  = 120 * time.Millisecond
 )
 
 var inspectANSIRegex = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
@@ -56,17 +59,37 @@ func (s *ProbeService) FetchSessionInspectLatestBlock(ctx context.Context, host 
 	args := s.buildSSHArgs(host, remoteCmd)
 	args = stripTTYArgs(args)
 
-	raw, err := s.runner.Run(ctx, "ssh", args...)
-	if err != nil {
-		return "", fmt.Errorf("fetch session inspect export: %w", err)
+	var lastParseErr error
+	for attempt := 1; attempt <= inspectFetchMaxAttempts; attempt++ {
+		raw, err := s.runner.Run(ctx, "ssh", args...)
+		if err != nil {
+			return "", fmt.Errorf("fetch session inspect export: %w", err)
+		}
+
+		block, parseErr := extractLatestConversationBlock(raw)
+		if parseErr == nil {
+			return block, nil
+		}
+
+		lastParseErr = parseErr
+		if attempt == inspectFetchMaxAttempts || ctx.Err() != nil {
+			break
+		}
+
+		timer := time.NewTimer(inspectFetchRetryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", fmt.Errorf("fetch session inspect export canceled: %w", ctx.Err())
+		case <-timer.C:
+		}
 	}
 
-	block, err := extractLatestConversationBlock(raw)
-	if err != nil {
-		return "", fmt.Errorf("parse session inspect export: %w", err)
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("fetch session inspect export canceled: %w", ctx.Err())
 	}
 
-	return block, nil
+	return "", fmt.Errorf("parse session inspect export: %w", lastParseErr)
 }
 
 func buildInspectRemoteCmd(host model.Host, session model.Session) string {

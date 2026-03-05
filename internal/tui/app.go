@@ -89,6 +89,8 @@ const (
 	errorToastTimeout      = 5 * time.Second
 	maxSanitizedErrorRunes = 320
 	inspectCacheTTL        = 30 * time.Second
+	inspectErrorCacheTTL   = 2 * time.Second
+	inspectFetchTimeout    = 30 * time.Second
 )
 
 type inspectCacheEntry struct {
@@ -638,7 +640,11 @@ func (m *AppModel) syncInspectSelection() tea.Cmd {
 	key := inspectSelectionKey(*host, *project, decorated)
 
 	if entry, ok := m.inspectCache[key]; ok {
-		if time.Since(entry.FetchedAt) <= inspectCacheTTL {
+		ttl := inspectCacheTTL
+		if strings.TrimSpace(entry.Err) != "" {
+			ttl = inspectErrorCacheTTL
+		}
+		if time.Since(entry.FetchedAt) <= ttl {
 			decorated.InspectLatestBlock = entry.Content
 			decorated.InspectError = entry.Err
 		} else {
@@ -672,7 +678,7 @@ func (m *AppModel) fetchInspectSelectionCmd(key string, host model.Host, session
 	}
 
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), inspectFetchTimeout)
 		defer cancel()
 
 		content, err := prober.FetchSessionInspectLatestBlock(ctx, host, session)
