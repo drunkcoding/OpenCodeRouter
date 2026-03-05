@@ -2,6 +2,7 @@ package components
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"opencoderouter/internal/tui/model"
@@ -21,6 +22,7 @@ const (
 	ModalTypeNewDirectory  ModalType = "new_directory"
 	ModalTypeGitClone      ModalType = "git_clone"
 	ModalTypeConfirmKill   ModalType = "confirm_kill"
+	ModalTypeConfirmReload ModalType = "confirm_reload"
 	ModalTypeErrorDetail   ModalType = "error_detail"
 	ModalTypeAuthBootstrap ModalType = "auth_bootstrap"
 )
@@ -118,6 +120,22 @@ func (m *ModalLayer) OpenConfirmKill(hostName, sessionID, directory string) {
 	m.confirmText = "y confirm • n cancel"
 	m.hostName = hostName
 	m.sessionID = sessionID
+	m.directory = directory
+	m.input.Blur()
+}
+
+func (m *ModalLayer) OpenConfirmReload(hostName, directory string) {
+	projectName := filepath.Base(filepath.Clean(strings.TrimSpace(directory)))
+	if projectName == "." || projectName == string(filepath.Separator) || projectName == "" {
+		projectName = directory
+	}
+
+	m.active = true
+	m.modalType = ModalTypeConfirmReload
+	m.title = "Reload OpenCode"
+	m.body = fmt.Sprintf("Reload OpenCode for %s on %s?\n%s", projectName, hostName, directory)
+	m.confirmText = "y confirm • n cancel"
+	m.hostName = hostName
 	m.directory = directory
 	m.input.Blur()
 }
@@ -277,6 +295,24 @@ func (m ModalLayer) Update(msg tea.Msg) (ModalLayer, tea.Cmd) {
 					return model.ModalConfirmKillMsg{
 						HostName:  hostName,
 						SessionID: sessionID,
+						Directory: directory,
+					}
+				}
+			case "n", "esc":
+				m.Close()
+			}
+		}
+
+	case ModalTypeConfirmReload:
+		if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
+			switch keyMsg.String() {
+			case "y":
+				hostName := m.hostName
+				directory := m.directory
+				m.Close()
+				return m, func() tea.Msg {
+					return model.ModalConfirmReloadMsg{
+						HostName:  hostName,
 						Directory: directory,
 					}
 				}

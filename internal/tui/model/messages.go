@@ -73,6 +73,12 @@ type ModalConfirmKillMsg struct {
 	Directory string
 }
 
+// ModalConfirmReloadMsg is emitted when the user confirms sessions reload.
+type ModalConfirmReloadMsg struct {
+	HostName  string
+	Directory string
+}
+
 // CreateSessionFinishedMsg is returned when interactive SSH session creation exits.
 type CreateSessionFinishedMsg struct {
 	Err error
@@ -81,6 +87,14 @@ type CreateSessionFinishedMsg struct {
 // KillSessionFinishedMsg is returned when background SSH session kill completes.
 type KillSessionFinishedMsg struct {
 	Err error
+}
+
+// ReloadSessionsFinishedMsg is returned when background reload command completes.
+type ReloadSessionsFinishedMsg struct {
+	HostName    string
+	Directory   string
+	Err         error
+	KilledCount int
 }
 
 // GitCloneFinishedMsg is returned when interactive SSH git clone + session exits.

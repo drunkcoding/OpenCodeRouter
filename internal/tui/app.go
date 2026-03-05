@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os/exec"
 	"path"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -76,6 +78,8 @@ type AppModel struct {
 	width       int
 	height      int
 	showInspect bool
+
+	reloadInProgress bool
 
 	activeView      appView
 	activeSessionID string
@@ -278,6 +282,22 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.killSessionCmd(*host, typed.SessionID, typed.Directory))
 		}
 
+	case model.ModalConfirmReloadMsg:
+		if m.reloadInProgress {
+			break
+		}
+		if host := m.findHostByName(typed.HostName); host != nil {
+			directory := strings.TrimSpace(typed.Directory)
+			if directory == "" {
+				break
+			}
+
+			m.reloadInProgress = true
+			detachedCount := m.detachProjectTerminals(*host, directory)
+			m.logger.Info("reload sessions confirmed", "host", host.Name, "directory", directory, "detached_terminals", detachedCount)
+			cmds = append(cmds, m.reloadSessionsCmd(*host, directory))
+		}
+
 	case model.CreateSessionFinishedMsg:
 		if typed.Err != nil {
 			m.logger.Info("create session finished", "status", "error")
@@ -303,6 +323,27 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if toastCmd := m.showErrorToast(typed.Err); toastCmd != nil {
 				cmds = append(cmds, toastCmd)
 			}
+		}
+		cmds = append(cmds, m.refreshCmd())
+
+	case model.ReloadSessionsFinishedMsg:
+		m.reloadInProgress = false
+		if typed.Err != nil {
+			m.logger.Info("reload sessions finished", "status", "error")
+			m.logger.Error("reload sessions failed", "host", typed.HostName, "directory", typed.Directory, "error", sanitizeError(typed.Err))
+			if toastCmd := m.showErrorToast(typed.Err); toastCmd != nil {
+				cmds = append(cmds, toastCmd)
+			}
+		} else {
+			m.logger.Info("reload sessions finished", "status", "success", "host", typed.HostName, "directory", typed.Directory, "killed_count", typed.KilledCount)
+			message := fmt.Sprintf("Reloaded OpenCode for %s", typed.Directory)
+			if typed.KilledCount > 0 {
+				message = fmt.Sprintf("Reloaded OpenCode for %s (%d processes restarted)", typed.Directory, typed.KilledCount)
+			}
+			if toastCmd := m.toast.Show(message, components.ToastSeverityInfo, errorToastTimeout); toastCmd != nil {
+				cmds = append(cmds, toastCmd)
+			}
+			m.resize(m.width, m.height)
 		}
 		cmds = append(cmds, m.refreshCmd())
 
@@ -391,6 +432,26 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if host, _, session, ok := m.tree.Selected(); ok && host != nil && session != nil {
 				m.modal.OpenConfirmKill(host.Name, session.ID, session.Directory)
 			}
+		case keys.Matches(typed.String(), m.keys.ReloadSessions):
+			keyCategory = "reload_sessions"
+			if m.reloadInProgress {
+				break
+			}
+			host, project, selectedSession, ok := m.tree.Selected()
+			if !ok || host == nil || host.Status != model.HostStatusOnline {
+				break
+			}
+
+			directory := resolveReloadProjectDirectory(project, selectedSession)
+			if directory == "" {
+				if toastCmd := m.toast.Show("Select a project or session to reload", components.ToastSeverityWarning, errorToastTimeout); toastCmd != nil {
+					cmds = append(cmds, toastCmd)
+				}
+				m.resize(m.width, m.height)
+				break
+			}
+
+			m.modal.OpenConfirmReload(host.Name, directory)
 		case keys.Matches(typed.String(), m.keys.GitClone):
 			keyCategory = "git_clone"
 			host, _, _, ok := m.tree.Selected()
@@ -978,6 +1039,53 @@ func (m *AppModel) killSessionCmd(host model.Host, sessionID, directory string) 
 	}
 }
 
+func (m *AppModel) reloadSessionsCmd(host model.Host, directory string) tea.Cmd {
+	m.logger.Info("reload sessions initiated", "host", host.Name, "directory", directory)
+
+	remoteCmd := fmt.Sprintf(`target_dir=%q
+killed=0
+for pid in $(pgrep -f 'opencode serve' 2>/dev/null); do
+  cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)
+  if [ "$cwd" = "$target_dir" ]; then
+    if kill "$pid" 2>/dev/null; then
+      killed=$((killed+1))
+    fi
+  fi
+done
+remaining=0
+for pid in $(pgrep -f 'opencode serve' 2>/dev/null); do
+  cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)
+  if [ "$cwd" = "$target_dir" ]; then
+    remaining=$((remaining+1))
+  fi
+done
+printf 'reload:killed:%%s\n' "$killed"
+printf 'reload:remaining:%%s\n' "$remaining"`, directory)
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		c := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-t", host.Name, remoteCmd)
+		output, runErr := c.CombinedOutput()
+		outputText := string(output)
+		killedCount := parseReloadKilledCount(outputText)
+		remainingCount := parseReloadRemainingCount(outputText)
+
+		err := runErr
+		if err == nil && remainingCount > 0 {
+			err = fmt.Errorf("%d process(es) remain after reload kill sweep", remainingCount)
+		}
+
+		return model.ReloadSessionsFinishedMsg{
+			HostName:    host.Name,
+			Directory:   directory,
+			Err:         err,
+			KilledCount: killedCount,
+		}
+	}
+}
+
 func (m *AppModel) gitCloneSessionCmd(host model.Host, gitURL string) tea.Cmd {
 	m.logger.Info("git clone initiated", "host", host.Name, "git_url", gitURL)
 
@@ -1007,9 +1115,144 @@ func (m *AppModel) findHostByName(name string) *model.Host {
 	return nil
 }
 
+func resolveReloadProjectDirectory(project *model.Project, selectedSession *model.Session) string {
+	if selectedSession != nil {
+		projectName := ""
+		if project != nil {
+			projectName = project.Name
+		}
+		return projectDirectoryFromSession(projectName, selectedSession.Directory)
+	}
+
+	if project == nil {
+		return ""
+	}
+
+	for _, sessionData := range project.Sessions {
+		directory := projectDirectoryFromSession(project.Name, sessionData.Directory)
+		if directory != "" {
+			return directory
+		}
+	}
+
+	return ""
+}
+
+func projectDirectoryFromSession(projectName, sessionDirectory string) string {
+	directory := strings.TrimSpace(sessionDirectory)
+	if directory == "" {
+		return ""
+	}
+
+	directory = filepath.Clean(directory)
+	if directory == "." {
+		return ""
+	}
+
+	projectName = strings.TrimSpace(projectName)
+	if projectName == "" {
+		return directory
+	}
+
+	if filepath.Base(directory) == projectName {
+		return directory
+	}
+
+	cursor := directory
+	for {
+		parent := filepath.Dir(cursor)
+		if parent == cursor {
+			break
+		}
+		if filepath.Base(parent) == projectName {
+			return parent
+		}
+		cursor = parent
+	}
+
+	return directory
+}
+
+func (m *AppModel) detachProjectTerminals(host model.Host, directory string) int {
+	targetDir := strings.TrimSpace(directory)
+	if targetDir == "" {
+		return 0
+	}
+
+	manager := m.ensureSessionManager()
+	detached := 0
+
+	for _, project := range host.Projects {
+		projectSelected := false
+		for _, sessionData := range project.Sessions {
+			if projectDirectoryFromSession(project.Name, sessionData.Directory) == targetDir {
+				projectSelected = true
+				break
+			}
+		}
+		if !projectSelected {
+			continue
+		}
+
+		for _, sessionData := range project.Sessions {
+			if projectDirectoryFromSession(project.Name, sessionData.Directory) != targetDir {
+				continue
+			}
+			if manager.Get(sessionData.ID) == nil {
+				continue
+			}
+			manager.Remove(sessionData.ID)
+			detached++
+			if sessionData.ID == m.activeSessionID {
+				m.activeView = viewTree
+				m.activeSessionID = ""
+			}
+		}
+
+		break
+	}
+
+	if detached > 0 {
+		m.syncFooterContext()
+	}
+
+	return detached
+}
+
 func repoNameFromURL(gitURL string) string {
 	base := path.Base(gitURL)
 	return strings.TrimSuffix(base, ".git")
+}
+
+func parseReloadKilledCount(output string) int {
+	return parseReloadMarkerCount(output, "reload:killed:")
+}
+
+func parseReloadRemainingCount(output string) int {
+	return parseReloadMarkerCount(output, "reload:remaining:")
+}
+
+func parseReloadMarkerCount(output, marker string) int {
+	if strings.TrimSpace(marker) == "" {
+		return 0
+	}
+
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, marker) {
+			continue
+		}
+
+		rawCount := strings.TrimSpace(strings.TrimPrefix(trimmed, marker))
+		count, err := strconv.Atoi(rawCount)
+		if err != nil || count < 0 {
+			continue
+		}
+
+		return count
+	}
+
+	return 0
 }
 
 func countHostErrors(hosts []model.Host) int {
