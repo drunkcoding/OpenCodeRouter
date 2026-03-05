@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -53,6 +54,7 @@ func (s *ProbeService) FetchSessionInspectLatestBlock(ctx context.Context, host 
 
 	remoteCmd := buildInspectRemoteCmd(host, session)
 	args := s.buildSSHArgs(host, remoteCmd)
+	args = stripTTYArgs(args)
 
 	raw, err := s.runner.Run(ctx, "ssh", args...)
 	if err != nil {
@@ -77,17 +79,43 @@ func buildInspectRemoteCmd(host model.Host, session model.Session) string {
 	dirEsc := shellEscapeSingleQuotes(session.Directory)
 	idEsc := shellEscapeSingleQuotes(session.ID)
 
-	return fmt.Sprintf("set -e; OC=$(command -v '%s' || echo \"$HOME/.opencode/bin/%s\"); cd '%s' && \"$OC\" export '%s' 2>/dev/null", binEsc, binEsc, dirEsc, idEsc)
+	return fmt.Sprintf("set -e; OC=$(command -v '%s' || echo \"$HOME/.opencode/bin/%s\"); cd '%s' && \"$OC\" export '%s'", binEsc, binEsc, dirEsc, idEsc)
 }
 
 func shellEscapeSingleQuotes(input string) string {
 	return strings.ReplaceAll(input, "'", "'\"'\"'")
 }
 
+func stripTTYArgs(args []string) []string {
+	result := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg == "-t" {
+			continue
+		}
+		result = append(result, arg)
+	}
+	return result
+}
+
 func extractLatestConversationBlock(raw []byte) (string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return "", nil
+	}
+
 	var payload exportedSession
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return "", err
+	if err := json.Unmarshal(trimmed, &payload); err != nil {
+		start := bytes.IndexByte(trimmed, '{')
+		end := bytes.LastIndexByte(trimmed, '}')
+		if start >= 0 && end > start {
+			if recoverErr := json.Unmarshal(trimmed[start:end+1], &payload); recoverErr == nil {
+				err = nil
+			} else {
+				return "", err
+			}
+		} else {
+			return "", err
+		}
 	}
 
 	toolFallback := ""

@@ -49,6 +49,28 @@ func TestExtractLatestConversationBlockMalformed(t *testing.T) {
 	}
 }
 
+func TestExtractLatestConversationBlockEmptyIsAllowed(t *testing.T) {
+	got, err := extractLatestConversationBlock([]byte("  \n\t  "))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("expected empty block, got %q", got)
+	}
+}
+
+func TestExtractLatestConversationBlockNoisyWrapper(t *testing.T) {
+	raw := []byte("prefix noise\n{\"messages\":[{\"info\":{\"role\":\"assistant\"},\"parts\":[{\"type\":\"text\",\"text\":\"wrapped answer\"}]}]}\ntrailer noise")
+
+	got, err := extractLatestConversationBlock(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "wrapped answer" {
+		t.Fatalf("unexpected block: %q", got)
+	}
+}
+
 func TestClampConversationBlock(t *testing.T) {
 	input := "\x1b[31mhello\x1b[0m\r\n"
 	for i := 0; i < 20; i++ {
