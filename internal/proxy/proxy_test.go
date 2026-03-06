@@ -1,12 +1,17 @@
 package proxy
 
 import (
+	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +32,33 @@ func testLogger() *slog.Logger {
 }
 
 func newTestRouter(reg *registry.Registry) *Router {
-	return New(reg, testCfg(), testLogger())
+	mockUI := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+
+		body := "OpenCode Router testuser"
+		for _, b := range reg.All() {
+			body += " " + b.Slug + " " + fmt.Sprint(b.Port) + " " + b.Version
+		}
+
+		if _, err := w.Write([]byte(body)); err != nil {
+			testLogger().Error("mock ui write failed", "error", err)
+		}
+	})
+	return New(reg, testCfg(), testLogger(), mockUI)
+}
+
+func mustPort(t *testing.T, rawURL string) int {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("failed to parse URL %q: %v", rawURL, err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatalf("failed to parse port from %q: %v", rawURL, err)
+	}
+	return port
 }
 
 // ---------------------------------------------------------------------------
@@ -109,7 +140,9 @@ func TestServeHTTP_HostRouting(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Backend", "reached")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("hello from backend"))
+		if _, err := w.Write([]byte("hello from backend")); err != nil {
+			t.Fatalf("backend write failed: %v", err)
+		}
 	}))
 	defer backend.Close()
 
@@ -156,7 +189,9 @@ func TestServeHTTP_PathRouting(t *testing.T) {
 	// Start a fake backend that echoes the received path.
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("path=" + r.URL.Path))
+		if _, err := w.Write([]byte("path=" + r.URL.Path)); err != nil {
+			t.Fatalf("backend path write failed: %v", err)
+		}
 	}))
 	defer backend.Close()
 
@@ -185,6 +220,189 @@ func TestServeHTTP_PathRouting(t *testing.T) {
 	if string(body) != "path=/api/v1/health" {
 		t.Errorf("unexpected body: %s (expected path=/api/v1/health)", body)
 	}
+}
+
+func TestWSRouteParsing(t *testing.T) {
+	rt := newTestRouter(registry.New(30*time.Second, testLogger()))
+
+	tests := []struct {
+		name      string
+		path      string
+		wantSlug  string
+		wantRest  string
+		wantMatch bool
+	}{
+		{"valid with nested path", "/ws/proj/echo/path", "proj", "/echo/path", true},
+		{"valid root path", "/ws/proj", "proj", "/", true},
+		{"valid trailing slash", "/ws/proj/", "proj", "/", true},
+		{"missing slug", "/ws/", "", "", false},
+		{"wrong prefix", "/proj/ws/echo", "", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			slug, rest, ok := rt.wsRoute(tt.path)
+			if ok != tt.wantMatch {
+				t.Fatalf("wsRoute(%q) match=%v, want %v", tt.path, ok, tt.wantMatch)
+			}
+			if slug != tt.wantSlug {
+				t.Fatalf("wsRoute(%q) slug=%q, want %q", tt.path, slug, tt.wantSlug)
+			}
+			if rest != tt.wantRest {
+				t.Fatalf("wsRoute(%q) remainder=%q, want %q", tt.path, rest, tt.wantRest)
+			}
+		})
+	}
+}
+
+func TestServeHTTP_WSRouteRequiresUpgrade(t *testing.T) {
+	reg := registry.New(30*time.Second, testLogger())
+	rt := newTestRouter(reg)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/ws/proj/echo", nil)
+	rt.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	if !strings.Contains(strings.ToLower(w.Body.String()), "upgrade") {
+		t.Fatalf("expected upgrade error message, got %q", w.Body.String())
+	}
+}
+
+func TestServeHTTP_WSRouteInvalidSlug(t *testing.T) {
+	reg := registry.New(30*time.Second, testLogger())
+	rt := newTestRouter(reg)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/ws/missing/echo", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	rt.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `backend "missing" not found`) {
+		t.Fatalf("expected clear missing backend message, got %q", w.Body.String())
+	}
+}
+
+func TestServeHTTP_WSRouteProxyAndTrackConnection(t *testing.T) {
+	holdOpen := make(chan struct{})
+	receivedPath := make(chan string, 1)
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath <- r.URL.Path
+
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("response writer does not support hijacking")
+			return
+		}
+
+		conn, rw, err := hj.Hijack()
+		if err != nil {
+			t.Errorf("hijack failed: %v", err)
+			return
+		}
+
+		_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
+		_, _ = rw.WriteString("Connection: Upgrade\r\n")
+		_, _ = rw.WriteString("Upgrade: websocket\r\n")
+		_, _ = rw.WriteString("Sec-WebSocket-Accept: test\r\n\r\n")
+		_ = rw.Flush()
+
+		<-holdOpen
+		_ = conn.Close()
+	}))
+	defer backend.Close()
+
+	reg := registry.New(30*time.Second, testLogger())
+	reg.Upsert(mustPort(t, backend.URL), "proj", "/home/test/proj", "1.0")
+
+	rt := newTestRouter(reg)
+	srv := httptest.NewServer(rt)
+	defer srv.Close()
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("failed to parse server URL: %v", err)
+	}
+
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+
+	_, err = fmt.Fprintf(conn,
+		"GET /ws/proj/echo HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+		u.Host,
+	)
+	if err != nil {
+		t.Fatalf("failed to write request: %v", err)
+	}
+
+	reader := bufio.NewReader(conn)
+	statusLine, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("failed to read status line: %v", err)
+	}
+	if !strings.Contains(statusLine, "101") {
+		t.Fatalf("expected 101 response, got %q", statusLine)
+	}
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("failed to read response headers: %v", err)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+
+	select {
+	case gotPath := <-receivedPath:
+		if gotPath != "/echo" {
+			t.Fatalf("expected proxied path /echo, got %q", gotPath)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("backend did not receive proxied websocket request")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	tracked := false
+	for time.Now().Before(deadline) {
+		rt.wsMu.Lock()
+		n := len(rt.wsConnections)
+		rt.wsMu.Unlock()
+		if n > 0 {
+			tracked = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !tracked {
+		t.Fatal("expected websocket connection to be tracked while open")
+	}
+
+	close(holdOpen)
+	_ = conn.Close()
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rt.wsMu.Lock()
+		n := len(rt.wsConnections)
+		rt.wsMu.Unlock()
+		if n == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatal("expected websocket connection to be untracked after close")
 }
 
 // ---------------------------------------------------------------------------
@@ -263,7 +481,9 @@ func TestAPIHealth(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal health response: %v", err)
+	}
 
 	if resp["healthy"] != true {
 		t.Error("expected healthy=true")
@@ -294,7 +514,9 @@ func TestAPIBackends_Empty(t *testing.T) {
 	}
 
 	var items []interface{}
-	json.Unmarshal(w.Body.Bytes(), &items)
+	if err := json.Unmarshal(w.Body.Bytes(), &items); err != nil {
+		t.Fatalf("unmarshal backends response: %v", err)
+	}
 	if len(items) != 0 {
 		t.Errorf("expected empty list, got %d items", len(items))
 	}
@@ -311,7 +533,9 @@ func TestAPIBackends_WithEntries(t *testing.T) {
 	rt.ServeHTTP(w, req)
 
 	var items []map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &items)
+	if err := json.Unmarshal(w.Body.Bytes(), &items); err != nil {
+		t.Fatalf("unmarshal backends entries response: %v", err)
+	}
 	if len(items) != 1 {
 		t.Fatalf("expected 1 item, got %d", len(items))
 	}

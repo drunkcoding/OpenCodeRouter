@@ -77,10 +77,12 @@ function processDiffs(text) {
     viewTerminal: document.getElementById('view-terminal'),
     terminalContainer: document.getElementById('terminal-container'),
     terminalSessionId: document.getElementById('terminal-session-id'),
+    terminalConnectionStatus: document.getElementById('terminal-connection-status'),
     btnDetachTerminal: document.getElementById('btn-detach-terminal'),
     chatHistory: document.getElementById('chat-history'),
     chatForm: document.getElementById('chat-form'),
     chatInput: document.getElementById('chat-input'),
+    chatContainer: document.getElementById('chat-container'),
     splitResizer: document.getElementById('split-resizer'),
     btnSendChat: document.getElementById('btn-send-chat')
   };
@@ -98,23 +100,64 @@ function processDiffs(text) {
 
   // Setup EventSource
   let evtSource = null;
+  let sseReconnectTimeout = null;
+
+  function clearSSEReconnectTimer() {
+    if (sseReconnectTimeout) {
+      clearTimeout(sseReconnectTimeout);
+      sseReconnectTimeout = null;
+    }
+  }
+
+  function setSSEIndicator(mode, detail) {
+    if (!DOM.sseIndicator) return;
+    if (mode === 'connected') {
+      DOM.sseIndicator.textContent = '● STREAM_ACTIVE';
+      DOM.sseIndicator.className = 'pulse-indicator online';
+      return;
+    }
+    if (mode === 'reconnecting') {
+      DOM.sseIndicator.textContent = `● RECONNECTING${detail ? ` (${detail})` : '...'}`;
+      DOM.sseIndicator.className = 'pulse-indicator';
+      return;
+    }
+    DOM.sseIndicator.textContent = `● DISCONNECTED${detail ? ` (${detail})` : ''}`;
+    DOM.sseIndicator.className = 'pulse-indicator';
+  }
+
+  function scheduleSSEReconnect(delayMs, reason) {
+    if (evtSource || sseReconnectTimeout) return;
+    setSSEIndicator('reconnecting', reason || 'retrying');
+    sseReconnectTimeout = setTimeout(() => {
+      sseReconnectTimeout = null;
+      connectSSE();
+    }, delayMs);
+  }
   
   function connectSSE() {
     if (evtSource) return;
+    clearSSEReconnectTimer();
     
     evtSource = new EventSource('/api/events');
     
     evtSource.onopen = () => {
-      DOM.sseIndicator.textContent = '● STREAM_ACTIVE';
-      DOM.sseIndicator.className = 'pulse-indicator online';
+      clearSSEReconnectTimer();
+      setSSEIndicator('connected');
     };
 
     evtSource.onerror = () => {
-      DOM.sseIndicator.textContent = '● RECONNECTING...';
-      DOM.sseIndicator.className = 'pulse-indicator';
+      if (!evtSource) return;
+
+      if (evtSource.readyState === EventSource.CONNECTING) {
+        setSSEIndicator('reconnecting', 'auto');
+        return;
+      }
+
+      const fatal = evtSource.readyState === EventSource.CLOSED;
+      setSSEIndicator(fatal ? 'disconnected' : 'reconnecting', fatal ? 'closed' : 'retrying');
       evtSource.close();
       evtSource = null;
-      setTimeout(connectSSE, 2000);
+      scheduleSSEReconnect(2000, fatal ? 'closed' : 'retrying');
     };
 
     const handleSessionEvent = (e) => {
@@ -172,6 +215,7 @@ function processDiffs(text) {
       connectSSE();
     } catch (e) {
       console.error('Failed to load initial sessions', e);
+      setSSEIndicator('disconnected', 'bootstrap failed');
       setTimeout(loadInitial, 5000);
     }
   }
@@ -338,11 +382,12 @@ function processDiffs(text) {
   let reconnectTimeout = null;
   let reconnectDelay = 1000;
 
-  function attachTerminal(sessionId) {
+  async function attachTerminal(sessionId) {
     activeTerminalSessionId = sessionId;
     DOM.viewSessions.style.display = 'none';
     DOM.viewTerminal.style.display = 'flex';
     DOM.terminalSessionId.textContent = sessionId;
+    if (DOM.terminalConnectionStatus) DOM.terminalConnectionStatus.textContent = 'Loading history...';
 
     if (!term) {
       term = new Terminal({
@@ -378,7 +423,8 @@ function processDiffs(text) {
     }
 
     term.clear();
-    term.writeln(`\x1b[36m> Attaching to session ${sessionId}...\x1b[0m`);
+    term.writeln(`\x1b[36m> Loading history...\x1b[0m`);
+    await hydrateTerminalScrollback(sessionId);
     loadChatHistory(sessionId);
     
     reconnectDelay = 1000;
@@ -405,7 +451,8 @@ function processDiffs(text) {
     ws.binaryType = 'arraybuffer';
 
     ws.onopen = () => {
-      term.writeln(`\x1b[32m> Connection established.\x1b[0m`);
+      term.writeln(`\x1b[32m> Connected\x1b[0m`);
+      if (DOM.terminalConnectionStatus) DOM.terminalConnectionStatus.textContent = 'Connected';
       reconnectDelay = 1000; // Reset backoff on success
       if (term.cols && term.rows) {
         ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
@@ -429,6 +476,12 @@ function processDiffs(text) {
     ws.onclose = (e) => {
       if (activeTerminalSessionId !== sessionId) return;
       term.writeln(`\r\n\x1b[33m> Disconnected (code: ${e.code}). Reconnecting in ${reconnectDelay}ms...\x1b[0m`);
+      if (DOM.terminalConnectionStatus) DOM.terminalConnectionStatus.textContent = `Reconnecting in ${reconnectDelay}ms...`;
+
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+      }
       
       reconnectTimeout = setTimeout(() => {
         connectTerminalWS(sessionId);
@@ -440,7 +493,31 @@ function processDiffs(text) {
 
     ws.onerror = (e) => {
       term.writeln(`\r\n\x1b[31m> WebSocket error.\x1b[0m`);
+      if (DOM.terminalConnectionStatus) DOM.terminalConnectionStatus.textContent = 'WebSocket error';
     };
+  }
+
+  async function hydrateTerminalScrollback(sessionId) {
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/scrollback?type=terminal_output&limit=1000`);
+      if (!res.ok) {
+        term.writeln(`\x1b[33m> History unavailable (${res.status})\x1b[0m`);
+        return;
+      }
+      const entries = await res.json();
+      if (!Array.isArray(entries) || entries.length === 0) {
+        return;
+      }
+
+      for (const entry of entries) {
+        if (!entry || entry.type !== 'terminal_output') continue;
+        const content = typeof entry.content === 'string' ? atob(entry.content) : '';
+        if (!content) continue;
+        term.write(content);
+      }
+    } catch (error) {
+      term.writeln(`\x1b[33m> Failed to load history\x1b[0m`);
+    }
   }
 
   function detachTerminal() {
@@ -456,6 +533,7 @@ function processDiffs(text) {
     DOM.viewTerminal.style.display = 'none';
     DOM.viewSessions.style.display = 'block';
     DOM.terminalSessionId.textContent = '';
+    if (DOM.terminalConnectionStatus) DOM.terminalConnectionStatus.textContent = '';
   }
 
   DOM.btnDetachTerminal.addEventListener('click', detachTerminal);
@@ -611,9 +689,11 @@ function processDiffs(text) {
       const percentage = (newWidth / splitView.width) * 100;
       if (percentage > 10 && percentage < 90) {
         DOM.terminalContainer.style.flex = '0 0 ' + percentage + '%';
-        DOM.chatContainer.style.flex = '1 1 0%';
-        if (terminalFitAddon) {
-          terminalFitAddon.fit();
+        if (DOM.chatContainer) {
+          DOM.chatContainer.style.flex = '1 1 0%';
+        }
+        if (fitAddon) {
+          fitAddon.fit();
         }
       }
     });

@@ -133,6 +133,74 @@ http://localhost:8080/myproject/session
 
 Open `http://localhost:8080/` in a browser to see a live table of all discovered backends with their status, domains, and links.
 
+## Browser Dashboard
+
+The browser dashboard is served from the control plane root (`/`) and uses
+control-plane APIs directly.
+
+### Quick start
+
+```bash
+go run . --port 8080 ~/my-projects
+```
+
+Then open:
+
+```text
+http://localhost:8080/
+```
+
+### Features
+
+- Session list and actions (`ATTACH`, `STOP`, `START`, `DEL`)
+- SSE-driven status updates from `/api/events`
+- Terminal attach via `/ws/terminal/{session-id}`
+- Terminal scrollback hydration via `/api/sessions/{id}/scrollback`
+- Chat panel streaming via `/api/sessions/{id}/chat`
+
+### Screenshot placeholder
+
+Add dashboard screenshots under a docs assets folder when available, for example:
+
+```text
+docs/assets/browser-dashboard.png
+docs/assets/browser-terminal.png
+```
+
+## VS Code Extension
+
+The repository includes a VS Code extension under `vscode-extension/`.
+
+### Install (development)
+
+```bash
+cd vscode-extension
+npm install
+npm run compile
+```
+
+Open this repository in VS Code and run **Extension Development Host**.
+
+### Configure
+
+- `opencode.controlPlaneUrl` (default: `http://localhost:8080`)
+- `opencode.authToken` (optional bearer token)
+
+### Features
+
+- Session tree view with connection status
+- Session create/attach/stop/restart/delete commands
+- Agent chat webview bound to selected session
+- Terminal profile backed by control-plane websocket bridge
+- Diff integration (`apply preview`, `apply`, `reject`, `clear highlights`)
+
+Troubleshooting note: terminal attach depends on runtime terminal bridge
+prerequisites (session daemon terminal capability + control-plane attach path).
+If prerequisites are unavailable in a given environment, terminal attach can fail
+with `502`/`503` while session APIs remain functional.
+
+For detailed extension usage, see `vscode-extension/README.md`.
+
 ## API
 
 | Endpoint | Description |
@@ -476,12 +544,16 @@ Each probe is a single SSH round-trip. Unreachable hosts show as ○ offline and
 ├── oc-kill                        # Kill all opencode serve instances (standalone)
 ├── internal/
 │   ├── config/config.go           # Router configuration types, defaults, validation
+│   ├── auth/                       # Auth + CORS env configuration and middleware integration
+│   ├── api/                        # Session lifecycle API, SSE events, scrollback APIs
 │   ├── launcher/launcher.go       # Manages opencode serve child processes
 │   ├── registry/registry.go       # Thread-safe backend registry
 │   ├── scanner/scanner.go         # Parallel port scanner + OpenCode probing
 │   ├── discovery/discovery.go     # mDNS advertisement via zeroconf
 │   ├── proxy/proxy.go             # Reverse proxy, routing, dashboard
-│   └── tui/                       # Remote session TUI (ocr)
+│   ├── session/                    # Session manager, health checks, circuit breaker
+│   └── terminal/                   # Terminal websocket handler + bridge
+│   └── tui/                        # Remote session TUI (ocr)
 │       ├── app.go                 # Top-level Bubble Tea model
 │       ├── components/
 │       │   ├── header.go          # Search bar, refresh countdown, fleet stats
@@ -499,6 +571,9 @@ Each probe is a single SSH round-trip. Unreachable hosts show as ○ offline and
 ├── go.mod
 └── go.sum
 ```
+
+For a full control-plane architecture guide (components, data flow, config,
+security, failure modes), see `docs/architecture.md`.
 
 ## Autodispatch (OpenClaw + TickTick)
 

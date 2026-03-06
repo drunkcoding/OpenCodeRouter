@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"opencoderouter/internal/tui/model"
+	"opencoderouter/internal/model"
 	"opencoderouter/internal/tui/theme"
 
 	tea "charm.land/bubbletea/v2"

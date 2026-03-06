@@ -2,23 +2,32 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
+	"opencoderouter/internal/api"
+	"opencoderouter/internal/auth"
+	"opencoderouter/internal/cache"
 	"opencoderouter/internal/config"
 	"opencoderouter/internal/discovery"
 	"opencoderouter/internal/launcher"
 	"opencoderouter/internal/proxy"
 	"opencoderouter/internal/registry"
 	"opencoderouter/internal/scanner"
+	"opencoderouter/internal/session"
+	"opencoderouter/internal/terminal"
 )
 
 func main() {
@@ -34,6 +43,7 @@ func main() {
 	flag.DurationVar(&cfg.ProbeTimeout, "probe-timeout", cfg.ProbeTimeout, "Timeout for each port probe")
 	flag.DurationVar(&cfg.StaleAfter, "stale-after", cfg.StaleAfter, "Remove backends unseen for this duration")
 	flag.BoolVar(&cfg.EnableMDNS, "mdns", cfg.EnableMDNS, "Enable mDNS service advertisement")
+	cleanupOrphans := flag.Bool("cleanup-orphans", false, "Cleanup likely orphan opencode serve processes in scan range on startup")
 	hostname := flag.String("hostname", "0.0.0.0", "Hostname/IP to bind the router to")
 	flag.Parse()
 
@@ -91,6 +101,9 @@ func main() {
 		"mdns", cfg.EnableMDNS,
 	)
 
+	orphanCleanupEnabled := *cleanupOrphans || envEnabled("OCR_CLEANUP_ORPHANS")
+	handleStartupOrphanOffer(cfg.ScanPortStart, cfg.ScanPortEnd, orphanCleanupEnabled, logger.With("component", "startup-cleanup"))
+
 	// Launch opencode serve instances for any project paths given as args.
 	var lnch *launcher.Launcher
 	if len(projectPaths) > 0 {
@@ -112,7 +125,43 @@ func main() {
 		cfg.ProbeTimeout,
 		logger.With("component", "scanner"),
 	)
-	rt := proxy.New(reg, cfg, logger.With("component", "proxy"))
+	uiHandler := http.FileServer(getWebFS())
+	rt := proxy.New(reg, cfg, logger.With("component", "proxy"), uiHandler)
+
+	eventBus := session.NewEventBus(100)
+	scrollbackCache, err := cache.NewJSONLCache(cache.CacheConfig{})
+	if err != nil {
+		logger.Error("failed to initialize scrollback cache", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if closeErr := scrollbackCache.Close(); closeErr != nil {
+			logger.Warn("failed to close scrollback cache", "error", closeErr)
+		}
+	}()
+
+	sessionMgr := session.NewManager(session.ManagerConfig{
+		Registry:            reg,
+		EventBus:            eventBus,
+		Logger:              logger.With("component", "session"),
+		PortStart:           cfg.ScanPortStart + 100, // separate range
+		PortEnd:             cfg.ScanPortEnd + 100,
+		HealthCheckInterval: 10 * time.Second,
+		HealthCheckTimeout:  2 * time.Second,
+		StopTimeout:         5 * time.Second,
+		EventBuffer:         100,
+		TerminalDialer: terminal.NewSessionDialer(terminal.SessionDialerConfig{
+			Logger: logger.With("component", "terminal-dialer"),
+		}),
+	})
+
+	apiRouter := api.NewRouter(api.RouterConfig{
+		SessionManager:  sessionMgr,
+		SessionEventBus: eventBus,
+		AuthConfig:      auth.LoadFromEnv(),
+		ScrollbackCache: scrollbackCache,
+		Fallback:        rt,
+	})
 
 	var adv *discovery.Advertiser
 	if cfg.EnableMDNS {
@@ -154,7 +203,7 @@ func main() {
 	// HTTP server.
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,
-		Handler:      rt,
+		Handler:      apiRouter,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 120 * time.Second, // long for SSE streaming
 		IdleTimeout:  120 * time.Second,
@@ -211,4 +260,172 @@ func main() {
 	}
 
 	logger.Info("OpenCode Router stopped")
+}
+
+type orphanProcess struct {
+	Port    int
+	PID     int
+	Command string
+}
+
+func handleStartupOrphanOffer(scanStart, scanEnd int, cleanup bool, logger *slog.Logger) {
+	orphans, err := detectLikelyOrphanOpenCodeServes(scanStart, scanEnd)
+	if err != nil {
+		if logger != nil {
+			logger.Debug("orphan detection unavailable", "error", err)
+		}
+		return
+	}
+	if len(orphans) == 0 {
+		return
+	}
+
+	if logger != nil {
+		logger.Warn(
+			"detected likely orphan opencode serve processes in configured scan range",
+			"count", len(orphans),
+			"scan_range", fmt.Sprintf("%d-%d", scanStart, scanEnd),
+			"cleanup_hint", "rerun with --cleanup-orphans or OCR_CLEANUP_ORPHANS=1",
+		)
+		for _, orphan := range orphans {
+			logger.Warn("orphan candidate", "port", orphan.Port, "pid", orphan.PID, "command", orphan.Command)
+		}
+	}
+
+	if !cleanup {
+		return
+	}
+
+	if logger != nil {
+		logger.Warn("startup orphan cleanup enabled; sending SIGTERM", "count", len(orphans))
+	}
+	cleanupLikelyOrphans(orphans, logger)
+}
+
+func detectLikelyOrphanOpenCodeServes(scanStart, scanEnd int) ([]orphanProcess, error) {
+	if scanEnd < scanStart {
+		return nil, nil
+	}
+
+	cmd := exec.Command("lsof", "-nP", fmt.Sprintf("-iTCP:%d-%d", scanStart, scanEnd), "-sTCP:LISTEN", "-Fpcn")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	return parseLikelyOrphansFromLsofOutput(string(output), scanStart, scanEnd), nil
+}
+
+func parseLikelyOrphansFromLsofOutput(raw string, scanStart, scanEnd int) []orphanProcess {
+	if scanEnd < scanStart {
+		return nil
+	}
+
+	lines := strings.Split(raw, "\n")
+	var (
+		currentPID int
+		currentCmd string
+	)
+
+	seen := make(map[string]struct{})
+	orphans := make([]orphanProcess, 0)
+
+	for _, lineRaw := range lines {
+		line := strings.TrimSpace(lineRaw)
+		if line == "" {
+			continue
+		}
+
+		tag := line[0]
+		value := strings.TrimSpace(line[1:])
+
+		switch tag {
+		case 'p':
+			pid, convErr := strconv.Atoi(value)
+			if convErr != nil {
+				currentPID = 0
+				continue
+			}
+			currentPID = pid
+		case 'c':
+			currentCmd = value
+		case 'n':
+			if currentPID == 0 {
+				continue
+			}
+			if !strings.Contains(strings.ToLower(currentCmd), "opencode") {
+				continue
+			}
+			port, ok := extractListenPort(value)
+			if !ok || port < scanStart || port > scanEnd {
+				continue
+			}
+			key := fmt.Sprintf("%d:%d", currentPID, port)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			orphans = append(orphans, orphanProcess{Port: port, PID: currentPID, Command: currentCmd})
+		}
+	}
+
+	return orphans
+}
+
+func cleanupLikelyOrphans(orphans []orphanProcess, logger *slog.Logger) {
+	seen := make(map[int]struct{})
+	for _, orphan := range orphans {
+		if _, ok := seen[orphan.PID]; ok {
+			continue
+		}
+		seen[orphan.PID] = struct{}{}
+
+		err := syscall.Kill(orphan.PID, syscall.SIGTERM)
+		if err == nil {
+			if logger != nil {
+				logger.Info("sent SIGTERM to likely orphan process", "pid", orphan.PID, "command", orphan.Command)
+			}
+			continue
+		}
+		if errors.Is(err, syscall.ESRCH) {
+			if logger != nil {
+				logger.Debug("orphan process already exited", "pid", orphan.PID)
+			}
+			continue
+		}
+		if logger != nil {
+			logger.Warn("failed to terminate likely orphan process", "pid", orphan.PID, "error", err)
+		}
+	}
+}
+
+func extractListenPort(addr string) (int, bool) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return 0, false
+	}
+	if idx := strings.Index(addr, "->"); idx > 0 {
+		addr = strings.TrimSpace(addr[:idx])
+	}
+	if idx := strings.Index(addr, "("); idx > 0 {
+		addr = strings.TrimSpace(addr[:idx])
+	}
+	idx := strings.LastIndex(addr, ":")
+	if idx < 0 || idx+1 >= len(addr) {
+		return 0, false
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(addr[idx+1:]))
+	if err != nil {
+		return 0, false
+	}
+	return port, true
+}
+
+func envEnabled(name string) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }

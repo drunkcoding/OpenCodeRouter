@@ -2,15 +2,17 @@ package model
 
 import "time"
 
+import sharedmodel "opencoderouter/internal/model"
+
 // DiscoveryResultMsg is emitted when host discovery completes.
 type DiscoveryResultMsg struct {
-	Hosts []Host
+	Hosts []sharedmodel.Host
 	Err   error
 }
 
 // ProbeResultMsg is emitted after probing all hosts.
 type ProbeResultMsg struct {
-	Hosts       []Host
+	Hosts       []sharedmodel.Host
 	Err         error
 	RefreshedAt time.Time
 }
@@ -33,7 +35,7 @@ type SearchChangedMsg struct {
 
 // TransportPreflightMsg is emitted after transport preflight probing completes.
 type TransportPreflightMsg struct {
-	Hosts []Host
+	Hosts []sharedmodel.Host
 	Err   error
 }
 

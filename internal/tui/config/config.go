@@ -114,7 +114,6 @@ func Load(ctx context.Context, filePath string) (Config, error) {
 	if _, err := os.Stat(resolved); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			if samePath(resolved, DefaultPath()) {
-				// TODO: add first-run bootstrap workflow to materialize a starter file.
 				return cfg, nil
 			}
 			return cfg, fmt.Errorf("config file %q does not exist", resolved)

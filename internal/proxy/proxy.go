@@ -3,14 +3,15 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
-	"html/template"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
+	"opencoderouter/internal/auth"
 	"opencoderouter/internal/config"
 	"opencoderouter/internal/registry"
 )
@@ -22,28 +23,55 @@ import (
 //
 // Unmatched requests get the dashboard.
 type Router struct {
-	registry *registry.Registry
-	cfg      config.Config
-	logger   *slog.Logger
+	registry  *registry.Registry
+	cfg       config.Config
+	logger    *slog.Logger
+	handler   http.Handler
+	uiHandler http.Handler
+
+	wsMu           sync.Mutex
+	wsConnections  map[string]string
+	wsConnSeq      uint64
+	wsPingInterval time.Duration
+}
+
+func writeJSONResponse(w http.ResponseWriter, payload any) {
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		slog.Default().Debug("failed to encode JSON response", "error", err)
+	}
 }
 
 // New creates a new Router.
-func New(reg *registry.Registry, cfg config.Config, logger *slog.Logger) *Router {
-	return &Router{
-		registry: reg,
-		cfg:      cfg,
-		logger:   logger,
+func New(reg *registry.Registry, cfg config.Config, logger *slog.Logger, uiHandler http.Handler) *Router {
+	rt := &Router{
+		registry:       reg,
+		cfg:            cfg,
+		logger:         logger,
+		wsConnections:  make(map[string]string),
+		wsPingInterval: defaultWSPingInterval,
+		uiHandler:      uiHandler,
 	}
+	rt.handler = auth.Middleware(http.HandlerFunc(rt.routeRequest), auth.LoadFromEnv())
+	return rt
 }
 
 // ServeHTTP implements http.Handler.
 func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	rt.handler.ServeHTTP(w, r)
+}
+
+func (rt *Router) routeRequest(w http.ResponseWriter, r *http.Request) {
 	// Try host-based routing first.
 	if slug := rt.slugFromHost(r.Host); slug != "" {
 		if backend, ok := rt.registry.Lookup(slug); ok {
 			rt.proxyTo(backend, w, r, "")
 			return
 		}
+	}
+
+	if rt.isWSRoute(r.URL.Path) {
+		rt.handleWSProxy(w, r)
+		return
 	}
 
 	// Try path-based routing: /{slug}/...
@@ -193,13 +221,13 @@ func (rt *Router) handleAPIBackends(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(items)
+	writeJSONResponse(w, items)
 }
 
 // handleAPIHealth returns the router's own health status.
 func (rt *Router) handleAPIHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSONResponse(w, map[string]interface{}{
 		"healthy":  true,
 		"username": rt.cfg.Username,
 		"backends": rt.registry.Len(),
@@ -242,7 +270,7 @@ func (rt *Router) handleAPIResolve(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		writeJSONResponse(w, map[string]interface{}{
 			"error":  "not_found",
 			"query":  query,
 			"detail": "no backend found for this project",
@@ -251,7 +279,7 @@ func (rt *Router) handleAPIResolve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSONResponse(w, map[string]interface{}{
 		"slug":         backend.Slug,
 		"project_name": backend.ProjectName,
 		"project_path": backend.ProjectPath,
@@ -264,108 +292,11 @@ func (rt *Router) handleAPIResolve(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleDashboard renders an HTML page listing all discovered backends.
+// handleDashboard serves the dashboard UI.
 func (rt *Router) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	backends := rt.registry.All()
-
-	type entry struct {
-		Slug        string
-		ProjectName string
-		ProjectPath string
-		Port        int
-		Version     string
-		Domain      string
-		PathURL     string
-		LastSeen    string
-		Healthy     bool
-	}
-
-	entries := make([]entry, 0, len(backends))
-	for _, b := range backends {
-		entries = append(entries, entry{
-			Slug:        b.Slug,
-			ProjectName: b.ProjectName,
-			ProjectPath: b.ProjectPath,
-			Port:        b.Port,
-			Version:     b.Version,
-			Domain:      rt.cfg.DomainFor(b.Slug),
-			PathURL:     fmt.Sprintf("/%s/", b.Slug),
-			LastSeen:    b.LastSeen.Format(time.RFC3339),
-			Healthy:     b.Healthy(rt.cfg.StaleAfter),
-		})
-	}
-
-	data := struct {
-		Username string
-		Entries  []entry
-		MDNS     bool
-	}{
-		Username: rt.cfg.Username,
-		Entries:  entries,
-		MDNS:     rt.cfg.EnableMDNS,
-	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := dashboardTmpl.Execute(w, data); err != nil {
-		rt.logger.Error("dashboard render error", "error", err)
+	if rt.uiHandler != nil {
+		rt.uiHandler.ServeHTTP(w, r)
+	} else {
+		http.NotFound(w, r)
 	}
 }
-
-var dashboardTmpl = template.Must(template.New("dashboard").Parse(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OpenCode Router — {{.Username}}</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-         background: #0f1117; color: #e1e4e8; padding: 2rem; }
-  h1 { font-size: 1.5rem; margin-bottom: 0.5rem; color: #58a6ff; }
-  .sub { color: #8b949e; margin-bottom: 2rem; font-size: 0.9rem; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 0.7rem 1rem; border-bottom: 1px solid #21262d; }
-  th { color: #8b949e; font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
-  td { font-size: 0.9rem; }
-  a { color: #58a6ff; text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-  .dot.healthy { background: #3fb950; }
-  .dot.stale { background: #f85149; }
-  .empty { color: #8b949e; text-align: center; padding: 3rem; }
-  code { background: #161b22; padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; }
-  .footer { margin-top: 2rem; color: #484f58; font-size: 0.8rem; }
-</style>
-</head>
-<body>
-<h1>OpenCode Router</h1>
-<p class="sub">User: <strong>{{.Username}}</strong> · mDNS: {{if .MDNS}}enabled{{else}}disabled{{end}} · <a href="/api/backends">JSON API</a></p>
-
-{{if .Entries}}
-<table>
-<thead>
-<tr><th>Status</th><th>Project</th><th>Slug</th><th>Backend</th><th>Domain</th><th>Path</th><th>Version</th><th>Last Seen</th></tr>
-</thead>
-<tbody>
-{{range .Entries}}
-<tr>
-  <td><span class="dot {{if .Healthy}}healthy{{else}}stale{{end}}"></span>{{if .Healthy}}Healthy{{else}}Stale{{end}}</td>
-  <td>{{.ProjectName}}</td>
-  <td><code>{{.Slug}}</code></td>
-  <td><code>127.0.0.1:{{.Port}}</code></td>
-  <td><a href="http://{{.Domain}}">{{.Domain}}</a></td>
-  <td><a href="{{.PathURL}}">{{.PathURL}}</a></td>
-  <td>{{.Version}}</td>
-  <td>{{.LastSeen}}</td>
-</tr>
-{{end}}
-</tbody>
-</table>
-{{else}}
-<p class="empty">No OpenCode instances discovered yet. Scanning ports…</p>
-{{end}}
-
-<p class="footer">Scan range: {{.Username}} · Auto-refreshes every scan interval</p>
-</body>
-</html>
-`))

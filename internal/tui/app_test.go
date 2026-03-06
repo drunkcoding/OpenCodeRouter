@@ -11,9 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"opencoderouter/internal/model"
 	"opencoderouter/internal/tui/components"
 	"opencoderouter/internal/tui/config"
-	"opencoderouter/internal/tui/model"
+	tuimodel "opencoderouter/internal/tui/model"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -282,7 +283,7 @@ func TestReloadSessionsCmd_Success(t *testing.T) {
 	directory := "/tmp/project-alpha"
 
 	msg := app.reloadSessionsCmd(host, directory)()
-	finished, ok := msg.(model.ReloadSessionsFinishedMsg)
+	finished, ok := msg.(tuimodel.ReloadSessionsFinishedMsg)
 	if !ok {
 		t.Fatalf("message type = %T, want model.ReloadSessionsFinishedMsg", msg)
 	}
@@ -347,7 +348,7 @@ func TestReloadSessionsCmd_NoProcessFound(t *testing.T) {
 	directory := "/tmp/project-beta"
 
 	msg := app.reloadSessionsCmd(host, directory)()
-	finished, ok := msg.(model.ReloadSessionsFinishedMsg)
+	finished, ok := msg.(tuimodel.ReloadSessionsFinishedMsg)
 	if !ok {
 		t.Fatalf("message type = %T, want model.ReloadSessionsFinishedMsg", msg)
 	}
@@ -372,7 +373,7 @@ func TestReloadSessionsCmd_ResidualProcessRemaining(t *testing.T) {
 	directory := "/tmp/project-residual"
 
 	msg := app.reloadSessionsCmd(host, directory)()
-	finished, ok := msg.(model.ReloadSessionsFinishedMsg)
+	finished, ok := msg.(tuimodel.ReloadSessionsFinishedMsg)
 	if !ok {
 		t.Fatalf("message type = %T, want model.ReloadSessionsFinishedMsg", msg)
 	}
@@ -400,7 +401,7 @@ func TestReloadSessionsCmd_SSHFailure(t *testing.T) {
 	directory := "/tmp/project-gamma"
 
 	msg := app.reloadSessionsCmd(host, directory)()
-	finished, ok := msg.(model.ReloadSessionsFinishedMsg)
+	finished, ok := msg.(tuimodel.ReloadSessionsFinishedMsg)
 	if !ok {
 		t.Fatalf("message type = %T, want model.ReloadSessionsFinishedMsg", msg)
 	}
@@ -425,7 +426,7 @@ func TestReloadSessionsCmd_PermissionDenied(t *testing.T) {
 	directory := "/tmp/project-delta"
 
 	msg := app.reloadSessionsCmd(host, directory)()
-	finished, ok := msg.(model.ReloadSessionsFinishedMsg)
+	finished, ok := msg.(tuimodel.ReloadSessionsFinishedMsg)
 	if !ok {
 		t.Fatalf("message type = %T, want model.ReloadSessionsFinishedMsg", msg)
 	}
@@ -450,7 +451,7 @@ func TestKillSessionCmd_SaveContextExportsThenDeletes(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	msg := app.killSessionCmd(host, "session-1", "/tmp/project-alpha", true)()
-	finished, ok := msg.(model.KillSessionFinishedMsg)
+	finished, ok := msg.(tuimodel.KillSessionFinishedMsg)
 	if !ok {
 		t.Fatalf("message type = %T, want model.KillSessionFinishedMsg", msg)
 	}
@@ -505,7 +506,7 @@ func TestKillSessionCmd_DeleteWithoutSaveSkipsExport(t *testing.T) {
 	host, argsFile := setupDeleteSessionMockSSH(t, "success")
 
 	msg := app.killSessionCmd(host, "session-1", "/tmp/project-alpha", false)()
-	finished, ok := msg.(model.KillSessionFinishedMsg)
+	finished, ok := msg.(tuimodel.KillSessionFinishedMsg)
 	if !ok {
 		t.Fatalf("message type = %T, want model.KillSessionFinishedMsg", msg)
 	}
@@ -541,7 +542,7 @@ func TestKillSessionCmd_SaveContextExportFailureStopsDelete(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	msg := app.killSessionCmd(host, "session-1", "/tmp/project-alpha", true)()
-	finished, ok := msg.(model.KillSessionFinishedMsg)
+	finished, ok := msg.(tuimodel.KillSessionFinishedMsg)
 	if !ok {
 		t.Fatalf("message type = %T, want model.KillSessionFinishedMsg", msg)
 	}
@@ -577,7 +578,7 @@ func TestKillSessionCmd_DeleteFailureReturnsSavedExportPath(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	msg := app.killSessionCmd(host, "session-1", "/tmp/project-alpha", true)()
-	finished, ok := msg.(model.KillSessionFinishedMsg)
+	finished, ok := msg.(tuimodel.KillSessionFinishedMsg)
 	if !ok {
 		t.Fatalf("message type = %T, want model.KillSessionFinishedMsg", msg)
 	}
@@ -617,7 +618,7 @@ func TestKillSessionCmd_CleanupFailureReturnsSavedExportPath(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	msg := app.killSessionCmd(host, "session-1", "/tmp/project-alpha", true)()
-	finished, ok := msg.(model.KillSessionFinishedMsg)
+	finished, ok := msg.(tuimodel.KillSessionFinishedMsg)
 	if !ok {
 		t.Fatalf("message type = %T, want model.KillSessionFinishedMsg", msg)
 	}
@@ -767,7 +768,7 @@ func TestCtrlR_SessionSelectionResolvesParentProjectDirectory(t *testing.T) {
 	}
 
 	msg := cmd()
-	confirm, ok := msg.(model.ModalConfirmReloadMsg)
+	confirm, ok := msg.(tuimodel.ModalConfirmReloadMsg)
 	if !ok {
 		t.Fatalf("message type = %T, want model.ModalConfirmReloadMsg", msg)
 	}
@@ -840,7 +841,7 @@ func TestReloadConfirm_DetachesActiveProjectTerminalsBeforeDispatch(t *testing.T
 	app.activeView = viewTerminal
 	app.activeSessionID = "alpha-2"
 
-	_, cmd := app.Update(model.ModalConfirmReloadMsg{HostName: host.Name, Directory: "/srv/work/alpha"})
+	_, cmd := app.Update(tuimodel.ModalConfirmReloadMsg{HostName: host.Name, Directory: "/srv/work/alpha"})
 	if cmd == nil {
 		t.Fatal("expected reload dispatch command after confirmation")
 	}
@@ -879,13 +880,13 @@ func TestReloadConfirm_DispatchesReloadSessionsCmd(t *testing.T) {
 
 	app, _ := setupReloadWiringApp(t, mockHost)
 
-	_, cmd := app.Update(model.ModalConfirmReloadMsg{HostName: mockHost.Name, Directory: "/tmp/project-alpha"})
+	_, cmd := app.Update(tuimodel.ModalConfirmReloadMsg{HostName: mockHost.Name, Directory: "/tmp/project-alpha"})
 	if cmd == nil {
 		t.Fatal("expected reloadSessionsCmd dispatch on modal confirm")
 	}
 
 	msg := cmd()
-	finished, ok := msg.(model.ReloadSessionsFinishedMsg)
+	finished, ok := msg.(tuimodel.ReloadSessionsFinishedMsg)
 	if !ok {
 		t.Fatalf("message type = %T, want model.ReloadSessionsFinishedMsg", msg)
 	}
@@ -916,7 +917,7 @@ func TestReloadFinished_SuccessUpdatesToastAndRefresh(t *testing.T) {
 	app, _ := setupReloadWiringApp(t, host)
 	app.reloadInProgress = true
 
-	_, cmd := app.Update(model.ReloadSessionsFinishedMsg{
+	_, cmd := app.Update(tuimodel.ReloadSessionsFinishedMsg{
 		HostName:    host.Name,
 		Directory:   "/srv/work/alpha",
 		KilledCount: 2,
@@ -958,7 +959,7 @@ func TestReloadFinished_ErrorUpdatesToastAndRefresh(t *testing.T) {
 	app.reloadInProgress = true
 
 	reloadErr := errors.New("reload failed: ssh timeout")
-	_, cmd := app.Update(model.ReloadSessionsFinishedMsg{
+	_, cmd := app.Update(tuimodel.ReloadSessionsFinishedMsg{
 		HostName:  host.Name,
 		Directory: "/srv/work/alpha",
 		Err:       reloadErr,
@@ -1008,7 +1009,7 @@ func batchContainsProbeResult(cmds tea.BatchMsg) bool {
 			continue
 		}
 
-		if _, isProbe := msg.(model.ProbeResultMsg); isProbe {
+		if _, isProbe := msg.(tuimodel.ProbeResultMsg); isProbe {
 			return true
 		}
 	}

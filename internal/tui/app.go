@@ -15,11 +15,12 @@ import (
 	"time"
 	"unicode"
 
+	"opencoderouter/internal/model"
 	"opencoderouter/internal/tui/components"
 	"opencoderouter/internal/tui/config"
 	"opencoderouter/internal/tui/discovery"
 	"opencoderouter/internal/tui/keys"
-	"opencoderouter/internal/tui/model"
+	tuimodel "opencoderouter/internal/tui/model"
 	"opencoderouter/internal/tui/probe"
 	"opencoderouter/internal/tui/session"
 	"opencoderouter/internal/tui/theme"
@@ -197,7 +198,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 
-	case model.TickMsg:
+	case tuimodel.TickMsg:
 		refreshDue := !m.nextRefresh.IsZero() && !typed.Now.Before(m.nextRefresh)
 		m.logger.Debug("update message", "message_type", "TickMsg", "refresh_due", refreshDue)
 		if refreshDue {
@@ -206,18 +207,18 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.header.SetRefreshDeadline(m.nextRefresh)
 		cmds = append(cmds, tickCmd())
 
-	case model.ProbeResultMsg:
+	case tuimodel.ProbeResultMsg:
 		m.logger.Debug("update message", "message_type", "ProbeResultMsg", "hosts", len(typed.Hosts), "has_error", typed.Err != nil)
 		if toastCmd := m.applyProbeResult(typed); toastCmd != nil {
 			cmds = append(cmds, toastCmd)
 		}
 
-	case model.TerminalOutputMsg:
+	case tuimodel.TerminalOutputMsg:
 		if typed.SessionID == m.activeSessionID {
 			m.logger.Debug("terminal output", "session_id", typed.SessionID, "bytes", len(typed.Data))
 		}
 
-	case model.TerminalInputForwardedMsg:
+	case tuimodel.TerminalInputForwardedMsg:
 		if typed.Err != nil {
 			m.logger.Error("terminal input forwarding failed", "session_id", typed.SessionID, "error", sanitizeError(typed.Err))
 			m.ensureSessionManager().CleanupClosed()
@@ -230,7 +231,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	case model.TerminalClosedMsg:
+	case tuimodel.TerminalClosedMsg:
 		m.logger.Info("terminal closed", "session_id", typed.SessionID, "active_session_id", m.activeSessionID, "has_error", typed.Err != nil)
 		m.ensureSessionManager().CleanupClosed()
 		if typed.SessionID == m.activeSessionID {
@@ -249,7 +250,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	case model.AttachFinishedMsg:
+	case tuimodel.AttachFinishedMsg:
 		if typed.Err != nil {
 			m.logger.Info("attach finished", "status", "error")
 			m.logger.Error("session attach failed", "error", sanitizeError(typed.Err))
@@ -263,22 +264,22 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, m.refreshCmd())
 
-	case model.ModalConfirmCreateMsg:
+	case tuimodel.ModalConfirmCreateMsg:
 		if host := m.findHostByName(typed.HostName); host != nil {
 			cmds = append(cmds, m.createSessionCmd(*host, typed.Directory))
 		}
 
-	case model.ModalConfirmNewDirMsg:
+	case tuimodel.ModalConfirmNewDirMsg:
 		if host := m.findHostByName(typed.HostName); host != nil {
 			cmds = append(cmds, m.createSessionCmd(*host, typed.Directory))
 		}
 
-	case model.ModalConfirmGitCloneMsg:
+	case tuimodel.ModalConfirmGitCloneMsg:
 		if host := m.findHostByName(typed.HostName); host != nil {
 			cmds = append(cmds, m.gitCloneSessionCmd(*host, typed.GitURL))
 		}
 
-	case model.ModalConfirmKillMsg:
+	case tuimodel.ModalConfirmKillMsg:
 		if host := m.findHostByName(typed.HostName); host != nil {
 			if manager := m.ensureSessionManager(); manager.Get(typed.SessionID) != nil {
 				manager.Remove(typed.SessionID)
@@ -291,7 +292,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.killSessionCmd(*host, typed.SessionID, typed.Directory, typed.SaveContext))
 		}
 
-	case model.ModalConfirmReloadMsg:
+	case tuimodel.ModalConfirmReloadMsg:
 		if m.reloadInProgress {
 			break
 		}
@@ -307,7 +308,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.reloadSessionsCmd(*host, directory))
 		}
 
-	case model.CreateSessionFinishedMsg:
+	case tuimodel.CreateSessionFinishedMsg:
 		if typed.Err != nil {
 			m.logger.Info("create session finished", "status", "error")
 			m.logger.Error("session create failed", "error", sanitizeError(typed.Err))
@@ -321,7 +322,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, m.refreshCmd())
 
-	case model.KillSessionFinishedMsg:
+	case tuimodel.KillSessionFinishedMsg:
 		if typed.Err != nil {
 			m.logger.Info("delete session finished", "status", "error")
 			m.logger.Error("session delete failed", "error", sanitizeError(typed.Err))
@@ -344,7 +345,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, m.refreshCmd())
 
-	case model.ReloadSessionsFinishedMsg:
+	case tuimodel.ReloadSessionsFinishedMsg:
 		m.reloadInProgress = false
 		if typed.Err != nil {
 			m.logger.Info("reload sessions finished", "status", "error")
@@ -365,7 +366,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, m.refreshCmd())
 
-	case model.GitCloneFinishedMsg:
+	case tuimodel.GitCloneFinishedMsg:
 		if typed.Err != nil {
 			m.logger.Info("git clone finished", "status", "error")
 			m.logger.Error("session git clone failed", "error", sanitizeError(typed.Err))
@@ -403,7 +404,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				sessionID := m.activeSessionID
 				cmds = append(cmds, func() tea.Msg {
 					if err := terminal.WriteInput(input); err != nil {
-						return model.TerminalInputForwardedMsg{SessionID: sessionID, Err: err}
+						return tuimodel.TerminalInputForwardedMsg{SessionID: sessionID, Err: err}
 					}
 					return nil
 				})
@@ -616,7 +617,7 @@ func (m *AppModel) refreshCmd() tea.Cmd {
 			)
 		}
 
-		return model.ProbeResultMsg{
+		return tuimodel.ProbeResultMsg{
 			Hosts:       probed,
 			Err:         resultErr,
 			RefreshedAt: time.Now(),
@@ -624,7 +625,7 @@ func (m *AppModel) refreshCmd() tea.Cmd {
 	}
 }
 
-func (m *AppModel) applyProbeResult(msg model.ProbeResultMsg) tea.Cmd {
+func (m *AppModel) applyProbeResult(msg tuimodel.ProbeResultMsg) tea.Cmd {
 	hostsBefore := len(m.hosts)
 	errorsBefore := countHostErrors(m.hosts)
 
@@ -730,7 +731,7 @@ func calculateFleetStats(hosts []model.Host) components.FleetStats {
 
 func tickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
-		return model.TickMsg{Now: t}
+		return tuimodel.TickMsg{Now: t}
 	})
 }
 
@@ -1033,7 +1034,7 @@ func (m *AppModel) createSessionCmd(host model.Host, directory string) tea.Cmd {
 
 	c := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-t", host.Name, remoteCmd)
 	return tea.ExecProcess(c, func(err error) tea.Msg {
-		return model.CreateSessionFinishedMsg{Err: err}
+		return tuimodel.CreateSessionFinishedMsg{Err: err}
 	})
 }
 
@@ -1105,32 +1106,32 @@ fi`,
 		if saveContext {
 			exportPath, err := defaultSessionExportPath(host.Name, sessionID)
 			if err != nil {
-				return model.KillSessionFinishedMsg{Err: err}
+				return tuimodel.KillSessionFinishedMsg{Err: err}
 			}
 
 			exportJSON, err := runSSHCommand(host.Name, exportRemoteCmd)
 			if err != nil {
-				return model.KillSessionFinishedMsg{Err: fmt.Errorf("export session %s: %w", sessionID, err)}
+				return tuimodel.KillSessionFinishedMsg{Err: fmt.Errorf("export session %s: %w", sessionID, err)}
 			}
 			if strings.TrimSpace(string(exportJSON)) == "" {
-				return model.KillSessionFinishedMsg{Err: fmt.Errorf("export session %s: empty export output", sessionID)}
+				return tuimodel.KillSessionFinishedMsg{Err: fmt.Errorf("export session %s: empty export output", sessionID)}
 			}
 
 			if err := os.WriteFile(exportPath, exportJSON, 0o600); err != nil {
-				return model.KillSessionFinishedMsg{Err: fmt.Errorf("save export %q: %w", exportPath, err)}
+				return tuimodel.KillSessionFinishedMsg{Err: fmt.Errorf("save export %q: %w", exportPath, err)}
 			}
 			savedExportPath = exportPath
 		}
 
 		if _, err := runSSHCommand(host.Name, deleteRemoteCmd); err != nil {
-			return model.KillSessionFinishedMsg{Err: fmt.Errorf("delete session %s: %w", sessionID, err), SavedExportPath: savedExportPath}
+			return tuimodel.KillSessionFinishedMsg{Err: fmt.Errorf("delete session %s: %w", sessionID, err), SavedExportPath: savedExportPath}
 		}
 
 		if _, err := runSSHCommand(host.Name, cleanupRemoteCmd); err != nil {
-			return model.KillSessionFinishedMsg{Err: fmt.Errorf("verify remote session process cleanup for %s: %w", sessionID, err), SavedExportPath: savedExportPath}
+			return tuimodel.KillSessionFinishedMsg{Err: fmt.Errorf("verify remote session process cleanup for %s: %w", sessionID, err), SavedExportPath: savedExportPath}
 		}
 
-		return model.KillSessionFinishedMsg{SavedExportPath: savedExportPath}
+		return tuimodel.KillSessionFinishedMsg{SavedExportPath: savedExportPath}
 	}
 }
 
@@ -1247,7 +1248,7 @@ printf 'reload:remaining:%%s\n' "$remaining"`, directory)
 			err = fmt.Errorf("%d process(es) remain after reload kill sweep", remainingCount)
 		}
 
-		return model.ReloadSessionsFinishedMsg{
+		return tuimodel.ReloadSessionsFinishedMsg{
 			HostName:    host.Name,
 			Directory:   directory,
 			Err:         err,
@@ -1272,7 +1273,7 @@ func (m *AppModel) gitCloneSessionCmd(host model.Host, gitURL string) tea.Cmd {
 
 	c := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-t", host.Name, remoteCmd)
 	return tea.ExecProcess(c, func(err error) tea.Msg {
-		return model.GitCloneFinishedMsg{Err: err}
+		return tuimodel.GitCloneFinishedMsg{Err: err}
 	})
 }
 

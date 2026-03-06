@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"opencoderouter/internal/tui/model"
+	"opencoderouter/internal/model"
 	"opencoderouter/internal/tui/theme"
 )
 

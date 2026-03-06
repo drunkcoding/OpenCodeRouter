@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"opencoderouter/internal/model"
 	"opencoderouter/internal/tui/config"
-	"opencoderouter/internal/tui/model"
 )
 
 type probeRunnerMock struct {

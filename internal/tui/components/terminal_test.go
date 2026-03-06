@@ -14,7 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"opencoderouter/internal/tui/model"
+	"opencoderouter/internal/model"
+	tuimodel "opencoderouter/internal/tui/model"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -129,14 +130,14 @@ func waitFor(t *testing.T, timeout time.Duration, desc string, cond func() bool)
 	t.Fatalf("timed out waiting for %s", desc)
 }
 
-func waitForClosedMsg(t *testing.T, ch <-chan tea.Msg, sessionID string, timeout time.Duration) model.TerminalClosedMsg {
+func waitForClosedMsg(t *testing.T, ch <-chan tea.Msg, sessionID string, timeout time.Duration) tuimodel.TerminalClosedMsg {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		select {
 		case msg := <-ch:
-			if closed, ok := msg.(model.TerminalClosedMsg); ok && closed.SessionID == sessionID {
+			if closed, ok := msg.(tuimodel.TerminalClosedMsg); ok && closed.SessionID == sessionID {
 				return closed
 			}
 		default:
@@ -145,7 +146,7 @@ func waitForClosedMsg(t *testing.T, ch <-chan tea.Msg, sessionID string, timeout
 	}
 
 	t.Fatalf("timed out waiting for TerminalClosedMsg for session %q", sessionID)
-	return model.TerminalClosedMsg{}
+	return tuimodel.TerminalClosedMsg{}
 }
 
 func newTestSession(sessionID string) model.Session {

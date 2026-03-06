@@ -8,6 +8,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.0
 	github.com/charmbracelet/x/vt v0.0.0-20260304084025-7dd5c0ab408e
 	github.com/charmbracelet/x/xpty v0.1.3
+	github.com/gorilla/websocket v1.5.3
 	github.com/grandcat/zeroconf v1.0.0
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/viper v1.20.1

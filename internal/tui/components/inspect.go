@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"opencoderouter/internal/tui/model"
+	"opencoderouter/internal/model"
 	"opencoderouter/internal/tui/theme"
 
 	lipgloss "charm.land/lipgloss/v2"
