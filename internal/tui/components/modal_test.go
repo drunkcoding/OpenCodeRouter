@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"opencoderouter/internal/tui/model"
+	tuimodel "opencoderouter/internal/tui/model"
 	"opencoderouter/internal/tui/theme"
 
 	tea "charm.land/bubbletea/v2"
@@ -45,7 +45,7 @@ func TestModalConfirmReloadEmitsConfirmMessage(t *testing.T) {
 	}
 
 	msg := cmd()
-	confirm, ok := msg.(model.ModalConfirmReloadMsg)
+	confirm, ok := msg.(tuimodel.ModalConfirmReloadMsg)
 	if !ok {
 		t.Fatalf("expected ModalConfirmReloadMsg, got %T", msg)
 	}
@@ -99,7 +99,7 @@ func TestModalConfirmKillYesEmitsSaveContextTrue(t *testing.T) {
 	}
 
 	msg := cmd()
-	confirm, ok := msg.(model.ModalConfirmKillMsg)
+	confirm, ok := msg.(tuimodel.ModalConfirmKillMsg)
 	if !ok {
 		t.Fatalf("expected ModalConfirmKillMsg, got %T", msg)
 	}
@@ -124,7 +124,7 @@ func TestModalConfirmKillNoEmitsSaveContextFalse(t *testing.T) {
 	}
 
 	msg := cmd()
-	confirm, ok := msg.(model.ModalConfirmKillMsg)
+	confirm, ok := msg.(tuimodel.ModalConfirmKillMsg)
 	if !ok {
 		t.Fatalf("expected ModalConfirmKillMsg, got %T", msg)
 	}

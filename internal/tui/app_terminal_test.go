@@ -10,8 +10,9 @@ import (
 	"sync"
 	"testing"
 
+	"opencoderouter/internal/model"
 	"opencoderouter/internal/tui/config"
-	"opencoderouter/internal/tui/model"
+	tuimodel "opencoderouter/internal/tui/model"
 	"opencoderouter/internal/tui/session"
 
 	tea "charm.land/bubbletea/v2"
@@ -413,7 +414,7 @@ func TestAppTerminalClosedMessageSwitchesToTreeAndCleansManager(t *testing.T) {
 	}
 	_ = terminal.Close()
 
-	_, cmd := app.Update(model.TerminalClosedMsg{SessionID: sessionData.ID})
+	_, cmd := app.Update(tuimodel.TerminalClosedMsg{SessionID: sessionData.ID})
 	if cmd != nil {
 		_ = cmd
 	}

@@ -15,7 +15,8 @@ import (
 	"syscall"
 	"time"
 
-	"opencoderouter/internal/tui/model"
+	"opencoderouter/internal/model"
+	tuimodel "opencoderouter/internal/tui/model"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/vt"
@@ -218,7 +219,7 @@ func (t *SessionTerminal) readLoop() {
 				return
 			}
 			t.logger.Debug("terminal readLoop chunk", "session_id", t.sessionID, "bytes", n, "preview", preview)
-			t.emit(model.TerminalOutputMsg{SessionID: t.sessionID, Data: chunk})
+			t.emit(tuimodel.TerminalOutputMsg{SessionID: t.sessionID, Data: chunk})
 		}
 
 		if err != nil {
@@ -246,7 +247,7 @@ func (t *SessionTerminal) emulatorReplyLoop() {
 					return
 				}
 				t.logger.Error("terminal emulator reply write failed", "session_id", t.sessionID, "error", writeErr, "bytes", len(reply), "preview", preview)
-				t.closeWithErr(writeErr)
+				_ = t.closeWithErr(writeErr)
 				return
 			}
 			t.logger.Debug("terminal emulator reply forwarded", "session_id", t.sessionID, "bytes", len(reply), "preview", preview)
@@ -256,7 +257,7 @@ func (t *SessionTerminal) emulatorReplyLoop() {
 				return
 			}
 			t.logger.Error("terminal emulator reply loop error", "session_id", t.sessionID, "error", err)
-			t.closeWithErr(err)
+			_ = t.closeWithErr(err)
 			return
 		}
 	}
@@ -278,7 +279,7 @@ func (t *SessionTerminal) watchNoOutput(timeout time.Duration) {
 	t.logger.Warn("terminal no output watchdog", "session_id", t.sessionID, "timeout", timeout.String(), "pid", pid)
 	note := "\r\n[ocr] Attach has no output yet. SSH is still running. Check ~/.ocr/ocr.log for details.\r\n"
 	_, _ = t.emulator.Write([]byte(note))
-	t.emit(model.TerminalOutputMsg{SessionID: t.sessionID})
+	t.emit(tuimodel.TerminalOutputMsg{SessionID: t.sessionID})
 
 	if pid <= 0 {
 		return
@@ -329,7 +330,7 @@ func (t *SessionTerminal) closeWithErr(reason error) error {
 		t.mu.Unlock()
 
 		t.logger.Info("terminal closed", "session_id", t.sessionID, "error", finalErr)
-		t.emit(model.TerminalClosedMsg{SessionID: t.sessionID, Err: finalErr})
+		t.emit(tuimodel.TerminalClosedMsg{SessionID: t.sessionID, Err: finalErr})
 	})
 
 	return closeErr

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"opencoderouter/internal/tui/model"
+	tuimodel "opencoderouter/internal/tui/model"
 	"opencoderouter/internal/tui/theme"
 
 	textinput "charm.land/bubbles/v2/textinput"
@@ -224,7 +224,7 @@ func (m ModalLayer) Update(msg tea.Msg) (ModalLayer, tea.Cmd) {
 				directory := m.directory
 				m.Close()
 				return m, func() tea.Msg {
-					return model.ModalConfirmCreateMsg{
+					return tuimodel.ModalConfirmCreateMsg{
 						HostName:  hostName,
 						Directory: directory,
 					}
@@ -249,7 +249,7 @@ func (m ModalLayer) Update(msg tea.Msg) (ModalLayer, tea.Cmd) {
 				hostName := m.hostName
 				m.Close()
 				return m, func() tea.Msg {
-					return model.ModalConfirmNewDirMsg{
+					return tuimodel.ModalConfirmNewDirMsg{
 						HostName:  hostName,
 						Directory: dir,
 					}
@@ -274,7 +274,7 @@ func (m ModalLayer) Update(msg tea.Msg) (ModalLayer, tea.Cmd) {
 				hostName := m.hostName
 				m.Close()
 				return m, func() tea.Msg {
-					return model.ModalConfirmGitCloneMsg{
+					return tuimodel.ModalConfirmGitCloneMsg{
 						HostName: hostName,
 						GitURL:   gitURL,
 					}
@@ -292,7 +292,7 @@ func (m ModalLayer) Update(msg tea.Msg) (ModalLayer, tea.Cmd) {
 				directory := m.directory
 				m.Close()
 				return m, func() tea.Msg {
-					return model.ModalConfirmKillMsg{
+					return tuimodel.ModalConfirmKillMsg{
 						HostName:    hostName,
 						SessionID:   sessionID,
 						Directory:   directory,
@@ -305,7 +305,7 @@ func (m ModalLayer) Update(msg tea.Msg) (ModalLayer, tea.Cmd) {
 				directory := m.directory
 				m.Close()
 				return m, func() tea.Msg {
-					return model.ModalConfirmKillMsg{
+					return tuimodel.ModalConfirmKillMsg{
 						HostName:    hostName,
 						SessionID:   sessionID,
 						Directory:   directory,
@@ -325,7 +325,7 @@ func (m ModalLayer) Update(msg tea.Msg) (ModalLayer, tea.Cmd) {
 				directory := m.directory
 				m.Close()
 				return m, func() tea.Msg {
-					return model.ModalConfirmReloadMsg{
+					return tuimodel.ModalConfirmReloadMsg{
 						HostName:  hostName,
 						Directory: directory,
 					}

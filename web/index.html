@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenCode Fleet Command</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+</head>
+<body>
+  <div class="grid-overlay"></div>
+  <div class="noise-overlay"></div>
+  
+  <header class="cmd-header">
+    <div class="cmd-brand">
+      <h1>[SYS.OP] OpenCode Fleet Command</h1>
+      <span class="pulse-indicator" id="sse-indicator">● OFFLINE</span>
+    </div>
+    <div class="cmd-stats" id="fleet-stats">
+      <div class="stat-box">
+        <span class="stat-label">ONLINE</span>
+        <span class="stat-value" id="stat-online">0</span>
+      </div>
+      <div class="stat-box">
+        <span class="stat-label">TOTAL</span>
+        <span class="stat-value" id="stat-total">0</span>
+      </div>
+      <button id="btn-create-session" class="cyber-button">[+] NEW_SESSION</button>
+    </div>
+  </header>
+
+  <main class="cmd-main" id="view-sessions">
+    <div class="toolbar">
+      <input type="text" id="search-input" class="cyber-input" placeholder="> grep sessions..." autocomplete="off">
+    </div>
+
+    <div class="table-container">
+      <table class="cyber-table" id="sessions-table">
+        <thead>
+          <tr>
+            <th>STATUS</th>
+            <th>ID</th>
+            <th>LABEL</th>
+            <th>WORKSPACE</th>
+            <th>ACTIONS</th>
+          </tr>
+        </thead>
+        <tbody id="sessions-body">
+          <!-- Populated by JS -->
+        </tbody>
+      </table>
+      <div id="empty-state" class="empty-state" style="display: none;">
+        > NO_SESSIONS_FOUND
+      </div>
+    </div>
+  </main>
+
+  <main class="cmd-main terminal-view" id="view-terminal" style="display: none;">
+    <div class="terminal-header">
+      <h2 id="terminal-session-title" class="terminal-title">> SESSION: <span id="terminal-session-id" class="id-col"></span></h2>
+      <span id="terminal-connection-status" class="pulse-indicator">Loading history...</span>
+      <div class="terminal-actions">
+        <button id="btn-detach-terminal" class="cyber-button warning">[ DETACH ]</button>
+      </div>
+    </div>
+    <div class="split-view">
+      <div id="terminal-container" class="terminal-container"></div>
+      <div id="split-resizer" class="split-resizer"></div>
+      <div id="chat-container" class="chat-container">
+        <div id="chat-history" class="chat-history"></div>
+        <form id="chat-form" class="chat-input-wrapper">
+          <textarea id="chat-input" class="cyber-input" placeholder="> Enter prompt..." rows="2"></textarea>
+          <button type="submit" id="btn-send-chat" class="cyber-button primary">[SEND]</button>
+        </form>
+      </div>
+    </div>
+  </main>
+
+  <div id="modal-overlay" class="modal-overlay" style="display: none;">
+    <div class="cyber-modal">
+      <div class="modal-header">
+        <h2>INITIALIZE_SESSION</h2>
+        <button id="btn-close-modal" class="icon-button">X</button>
+      </div>
+      <form id="create-session-form" class="modal-body">
+        <div class="form-group">
+          <label for="input-workspace">> TARGET_DIRECTORY</label>
+          <input type="text" id="input-workspace" class="cyber-input" placeholder="/home/user/project" required>
+        </div>
+        <div class="form-group">
+          <label for="input-label">> LABEL (OPTIONAL)</label>
+          <input type="text" id="input-label" class="cyber-input" placeholder="my-project">
+        </div>
+        <div class="modal-actions">
+          <button type="submit" class="cyber-button primary">[EXECUTE]</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

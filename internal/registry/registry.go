@@ -30,6 +30,7 @@ type Registry struct {
 	mu         sync.RWMutex
 	backends   map[string]*Backend // slug → backend
 	byPort     map[int]string      // port → slug (for fast dedup)
+	sessions   map[string]map[string]SessionMetadata
 	staleAfter time.Duration
 	logger     *slog.Logger
 }
@@ -39,6 +40,7 @@ func New(staleAfter time.Duration, logger *slog.Logger) *Registry {
 	return &Registry{
 		backends:   make(map[string]*Backend),
 		byPort:     make(map[int]string),
+		sessions:   make(map[string]map[string]SessionMetadata),
 		staleAfter: staleAfter,
 		logger:     logger,
 	}
@@ -54,6 +56,7 @@ func (r *Registry) Upsert(port int, projectName, projectPath, version string) bo
 	// Check if this port was previously registered under a different slug.
 	if oldSlug, ok := r.byPort[port]; ok && oldSlug != slug {
 		delete(r.backends, oldSlug)
+		delete(r.sessions, oldSlug)
 		r.logger.Info("backend project changed", "port", port, "old_slug", oldSlug, "new_slug", slug)
 	}
 
@@ -102,6 +105,7 @@ func (r *Registry) Prune() []string {
 		if time.Since(b.LastSeen) > r.staleAfter {
 			delete(r.backends, slug)
 			delete(r.byPort, b.Port)
+			delete(r.sessions, slug)
 			r.logger.Info("backend removed (stale)", "slug", slug, "port", b.Port)
 			removed = append(removed, slug)
 		}

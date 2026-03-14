@@ -1,0 +1,232 @@
+{
+  "name": "opencode-router",
+  "displayName": "OpenCode Control Plane",
+  "description": "Browse and manage OpenCode sessions from the control plane.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onView:opencodeSessions",
+    "onView:opencodeRemoteHosts",
+    "onView:opencodeChat",
+    "onTerminalProfile:opencode.terminalProfile",
+    "onCommand:opencode.attachSession",
+    "onCommand:opencode.createSession",
+    "onCommand:opencode.openChat",
+    "onCommand:opencode.openTerminal",
+    "onCommand:opencode.refreshSessions",
+    "onCommand:opencode.refreshRemoteHosts",
+    "onCommand:opencode.stopSession",
+    "onCommand:opencode.restartSession",
+    "onCommand:opencode.deleteSession",
+    "onCommand:opencode.applyDiffPreview",
+    "onCommand:opencode.applyLastDiff"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "opencode",
+          "title": "OpenCode",
+          "icon": "resources/opencode.svg"
+        }
+      ]
+    },
+    "views": {
+      "opencode": [
+        {
+          "id": "opencodeSessions",
+          "name": "Sessions"
+        },
+        {
+          "id": "opencodeRemoteHosts",
+          "name": "Remote Hosts"
+        },
+        {
+          "id": "opencodeChat",
+          "name": "Agent Chat",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "opencode.attachSession",
+        "title": "OpenCode: Attach Session"
+      },
+      {
+        "command": "opencode.createSession",
+        "title": "OpenCode: Create Session"
+      },
+      {
+        "command": "opencode.openChat",
+        "title": "OpenCode: Open Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "opencode.openTerminal",
+        "title": "OpenCode: Open Terminal",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "opencode.refreshSessions",
+        "title": "OpenCode: Refresh Sessions",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "opencode.refreshRemoteHosts",
+        "title": "OpenCode: Refresh Remote Hosts",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "opencode.stopSession",
+        "title": "OpenCode: Stop Session"
+      },
+      {
+        "command": "opencode.restartSession",
+        "title": "OpenCode: Restart Session"
+      },
+      {
+        "command": "opencode.deleteSession",
+        "title": "OpenCode: Delete Session"
+      },
+      {
+        "command": "opencode.applyDiffPreview",
+        "title": "OpenCode: Apply Diff Preview"
+      },
+      {
+        "command": "opencode.applyLastDiff",
+        "title": "OpenCode: Apply Last Staged Diff"
+      },
+      {
+        "command": "opencode.rejectLastDiff",
+        "title": "OpenCode: Reject Last Staged Diff"
+      },
+      {
+        "command": "opencode.clearDiffHighlights",
+        "title": "OpenCode: Clear Diff Highlights"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "opencode.createSession",
+          "when": "view == opencodeSessions",
+          "group": "navigation@1"
+        },
+        {
+          "command": "opencode.refreshSessions",
+          "when": "view == opencodeSessions",
+          "group": "navigation@2"
+        },
+        {
+          "command": "opencode.refreshRemoteHosts",
+          "when": "view == opencodeRemoteHosts",
+          "group": "navigation@1"
+        },
+        {
+          "command": "opencode.openChat",
+          "when": "view == opencodeChat",
+          "group": "navigation@1"
+        },
+        {
+          "command": "opencode.openTerminal",
+          "when": "view == opencodeSessions",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "opencode.attachSession",
+          "when": "view == opencodeSessions && viewItem == opencodeSession",
+          "group": "inline@1"
+        },
+        {
+          "command": "opencode.stopSession",
+          "when": "view == opencodeSessions && viewItem == opencodeSession",
+          "group": "navigation@2"
+        },
+        {
+          "command": "opencode.openChat",
+          "when": "view == opencodeSessions && viewItem == opencodeSession",
+          "group": "navigation@2.5"
+        },
+        {
+          "command": "opencode.openTerminal",
+          "when": "view == opencodeSessions && viewItem == opencodeSession",
+          "group": "navigation@2.6"
+        },
+        {
+          "command": "opencode.restartSession",
+          "when": "view == opencodeSessions && viewItem == opencodeSession",
+          "group": "navigation@3"
+        },
+        {
+          "command": "opencode.deleteSession",
+          "when": "view == opencodeSessions && viewItem == opencodeSession",
+          "group": "navigation@4"
+        }
+      ]
+    },
+    "terminal": {
+      "profiles": [
+        {
+          "id": "opencode.terminalProfile",
+          "title": "OpenCode Terminal",
+          "icon": "terminal"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "OpenCode",
+      "properties": {
+        "opencode.controlPlaneUrl": {
+          "type": "string",
+          "default": "http://localhost:8080",
+          "description": "Base URL for the OpenCode control plane."
+        },
+        "opencode.authToken": {
+          "type": "string",
+          "default": "",
+          "description": "Optional bearer token for control plane API requests."
+        },
+        "opencode.remoteSshConfigPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional SSH config path override for remote host discovery (for example ~/.ssh/config)."
+        },
+        "opencode.remoteHostsAutoRefreshSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "description": "Automatic refresh interval for Remote Hosts view in seconds (0 disables auto-refresh)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src/**/*.ts",
+    "test": "npm run compile && node ./out/test/runTest.js",
+    "package": "npx @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20.16.5",
+    "@types/vscode": "^1.90.0",
+    "@typescript-eslint/eslint-plugin": "^8.56.1",
+    "@typescript-eslint/parser": "^8.56.1",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^2.31.1",
+    "eslint": "^10.0.2",
+    "mocha": "^11.7.5",
+    "typescript": "^5.6.2"
+  }
+}

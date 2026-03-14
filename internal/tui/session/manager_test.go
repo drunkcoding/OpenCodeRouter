@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"opencoderouter/internal/tui/model"
+	"opencoderouter/internal/model"
 
 	tea "charm.land/bubbletea/v2"
 )

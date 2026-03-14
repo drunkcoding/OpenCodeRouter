@@ -12,14 +12,19 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
+	"opencoderouter/internal/model"
+	"opencoderouter/internal/registry"
+	"opencoderouter/internal/scanner"
 	"opencoderouter/internal/tui/components"
 	"opencoderouter/internal/tui/config"
 	"opencoderouter/internal/tui/discovery"
 	"opencoderouter/internal/tui/keys"
-	"opencoderouter/internal/tui/model"
+	"opencoderouter/internal/tui/local"
+	tuimodel "opencoderouter/internal/tui/model"
 	"opencoderouter/internal/tui/probe"
 	"opencoderouter/internal/tui/session"
 	"opencoderouter/internal/tui/theme"
@@ -36,6 +41,107 @@ type Discoverer interface {
 // Prober collects sessions from hosts via SSH probes.
 type Prober interface {
 	ProbeHosts(ctx context.Context, hosts []model.Host) ([]model.Host, error)
+}
+
+type localHostProvider interface {
+	Start()
+	Stop()
+	LocalHost() (*model.Host, error)
+}
+
+type scannerLocalHostProvider struct {
+	adapter    *local.Adapter
+	runScanner func(context.Context)
+
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+	started bool
+}
+
+func newScannerLocalHostProvider(cfg config.Config, logger *slog.Logger) localHostProvider {
+	localLogger := logger.With("component", "local_scanner")
+	staleAfter := localRegistryStaleAfter(cfg.Polling.Interval)
+	localRegistry := registry.New(staleAfter, localLogger)
+	adapter := local.NewAdapter(localRegistry, cfg.Display.ActiveThreshold, cfg.Display.IdleThreshold)
+
+	scanInterval := cfg.Polling.Interval
+	if scanInterval <= 0 {
+		scanInterval = 30 * time.Second
+	}
+
+	concurrency := cfg.Polling.MaxParallel
+	if concurrency <= 0 {
+		concurrency = 10
+	}
+
+	probeTimeout := minDuration(cfg.Polling.Timeout, localScannerProbeTimeout)
+	if probeTimeout <= 0 {
+		probeTimeout = localScannerProbeTimeout
+	}
+
+	localScanner := scanner.New(
+		localRegistry,
+		localScannerPortStart,
+		localScannerPortEnd,
+		scanInterval,
+		concurrency,
+		probeTimeout,
+		localLogger,
+	)
+
+	return &scannerLocalHostProvider{
+		adapter:    adapter,
+		runScanner: localScanner.Run,
+	}
+}
+
+func (p *scannerLocalHostProvider) Start() {
+	if p == nil {
+		return
+	}
+
+	p.mu.Lock()
+	if p.started || p.runScanner == nil {
+		p.mu.Unlock()
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	p.cancel = cancel
+	p.started = true
+	runScanner := p.runScanner
+	p.mu.Unlock()
+
+	go runScanner(ctx)
+}
+
+func (p *scannerLocalHostProvider) Stop() {
+	if p == nil {
+		return
+	}
+
+	p.mu.Lock()
+	cancel := p.cancel
+	p.cancel = nil
+	p.started = false
+	p.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (p *scannerLocalHostProvider) LocalHost() (*model.Host, error) {
+	if p == nil || p.adapter == nil {
+		return nil, local.ErrNoLocalBackends
+	}
+
+	host, err := p.adapter.GetLocalHost()
+	if err != nil {
+		return nil, err
+	}
+
+	return &host, nil
 }
 
 type appView int
@@ -62,8 +168,9 @@ type AppModel struct {
 	logger  *slog.Logger
 	program *tea.Program
 
-	discovery Discoverer
-	prober    Prober
+	discovery         Discoverer
+	prober            Prober
+	localHostProvider localHostProvider
 
 	header  components.HeaderBar
 	tree    components.SessionTreeView
@@ -88,8 +195,11 @@ type AppModel struct {
 }
 
 const (
-	errorToastTimeout      = 5 * time.Second
-	maxSanitizedErrorRunes = 320
+	errorToastTimeout        = 5 * time.Second
+	maxSanitizedErrorRunes   = 320
+	localScannerPortStart    = 49152
+	localScannerPortEnd      = 65535
+	localScannerProbeTimeout = 800 * time.Millisecond
 )
 
 // NewApp constructs the root model with injected services.
@@ -113,22 +223,23 @@ func NewApp(cfg config.Config, discoverer Discoverer, proberSvc Prober, logger *
 	}
 
 	app := &AppModel{
-		cfg:            cfg,
-		theme:          th,
-		keys:           keyMap,
-		logger:         appLogger,
-		discovery:      discoverer,
-		prober:         proberSvc,
-		header:         components.NewHeaderBar(th, cfg.Polling.Interval),
-		tree:           components.NewSessionTreeView(th),
-		inspect:        components.NewInspectPanel(th),
-		footer:         components.NewFooterHelpBar(keyMap, th),
-		toast:          components.NewInlineToast(th),
-		modal:          components.NewModalLayer(th),
-		spinner:        components.NewBrailleSpinner(cfg.Display.Animation),
-		showInspect:    true,
-		activeView:     viewTree,
-		sessionManager: session.NewManager(nil, logger, buildSSHControlOpts(cfg.SSH)),
+		cfg:               cfg,
+		theme:             th,
+		keys:              keyMap,
+		logger:            appLogger,
+		discovery:         discoverer,
+		prober:            proberSvc,
+		localHostProvider: newScannerLocalHostProvider(cfg, logger),
+		header:            components.NewHeaderBar(th, cfg.Polling.Interval),
+		tree:              components.NewSessionTreeView(th),
+		inspect:           components.NewInspectPanel(th),
+		footer:            components.NewFooterHelpBar(keyMap, th),
+		toast:             components.NewInlineToast(th),
+		modal:             components.NewModalLayer(th),
+		spinner:           components.NewBrailleSpinner(cfg.Display.Animation),
+		showInspect:       true,
+		activeView:        viewTree,
+		sessionManager:    session.NewManager(nil, logger, buildSSHControlOpts(cfg.SSH)),
 	}
 	app.tree.SetActiveSessionLookup(func(sessionID string) bool {
 		if strings.TrimSpace(sessionID) == "" {
@@ -165,6 +276,10 @@ func (m *AppModel) SetProgram(p *tea.Program) {
 
 // Init starts animation and the first refresh cycle.
 func (m *AppModel) Init() tea.Cmd {
+	if m.localHostProvider != nil {
+		go m.localHostProvider.Start()
+	}
+
 	m.nextRefresh = time.Now().Add(m.cfg.Polling.Interval)
 	m.header.SetRefreshDeadline(m.nextRefresh)
 	m.logger.Info("app init",
@@ -177,7 +292,7 @@ func (m *AppModel) Init() tea.Cmd {
 		m.header.Init(),
 		m.spinner.Init(),
 		tickCmd(),
-		m.refreshCmd(),
+		m.discoverCmd(),
 	)
 }
 
@@ -197,27 +312,90 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 
-	case model.TickMsg:
+	case tuimodel.TickMsg:
 		refreshDue := !m.nextRefresh.IsZero() && !typed.Now.Before(m.nextRefresh)
 		m.logger.Debug("update message", "message_type", "TickMsg", "refresh_due", refreshDue)
 		if refreshDue {
-			cmds = append(cmds, m.refreshCmd())
+			cmds = append(cmds, m.discoverCmd())
 		}
 		m.header.SetRefreshDeadline(m.nextRefresh)
 		cmds = append(cmds, tickCmd())
 
-	case model.ProbeResultMsg:
+	case tuimodel.DiscoveryResultMsg:
+		m.logger.Debug("update message", "message_type", "DiscoveryResultMsg", "hosts", len(typed.Hosts), "has_error", typed.Err != nil)
+		m.hosts = m.withLocalHost(typed.Hosts)
+		m.tree.SetHosts(m.hosts)
+		m.header.SetStats(calculateFleetStats(m.hosts))
+		m.syncInspectSelection()
+
+		if typed.Err != nil {
+			if toastCmd := m.showErrorToast(typed.Err); toastCmd != nil {
+				cmds = append(cmds, toastCmd)
+			}
+		}
+
+		if len(typed.Hosts) == 0 {
+			m.nextRefresh = time.Now().Add(m.cfg.Polling.Interval)
+			m.header.SetRefreshDeadline(m.nextRefresh)
+			if len(m.hosts) == 0 {
+				guidance := "No SSH hosts found. Check ~/.ssh/config and Hosts.Include config."
+				if toastCmd := m.toast.Show(guidance, components.ToastSeverityWarning, errorToastTimeout); toastCmd != nil {
+					cmds = append(cmds, toastCmd)
+				}
+			}
+			m.resize(m.width, m.height)
+			break
+		}
+
+		cmds = append(cmds, m.probeCmd(typed.Hosts))
+
+	case tuimodel.ProbeResultMsg:
 		m.logger.Debug("update message", "message_type", "ProbeResultMsg", "hosts", len(typed.Hosts), "has_error", typed.Err != nil)
 		if toastCmd := m.applyProbeResult(typed); toastCmd != nil {
 			cmds = append(cmds, toastCmd)
 		}
 
-	case model.TerminalOutputMsg:
+	case tuimodel.SSHErrorMsg:
+		if typed.Err != nil {
+			hostName := strings.TrimSpace(typed.Host)
+			if hostName == "" {
+				hostName = "unknown-host"
+			}
+			if toastCmd := m.showErrorToast(fmt.Errorf("ssh probe failed for %s: %w", hostName, typed.Err)); toastCmd != nil {
+				cmds = append(cmds, toastCmd)
+			}
+		}
+
+	case tuimodel.TransportPreflightMsg:
+		if len(typed.Hosts) > 0 {
+			indexByName := make(map[string]int, len(m.hosts))
+			for i := range m.hosts {
+				indexByName[m.hosts[i].Name] = i
+			}
+			for _, host := range typed.Hosts {
+				idx, ok := indexByName[host.Name]
+				if !ok {
+					continue
+				}
+				m.hosts[idx].Transport = host.Transport
+				m.hosts[idx].TransportError = host.TransportError
+				m.hosts[idx].BlockedBy = append([]string(nil), host.BlockedBy...)
+			}
+			m.tree.SetHosts(m.hosts)
+			m.syncInspectSelection()
+		}
+		if typed.Err != nil {
+			if toastCmd := m.showErrorToast(fmt.Errorf("transport preflight failed: %w", typed.Err)); toastCmd != nil {
+				cmds = append(cmds, toastCmd)
+			}
+		}
+
+	case tuimodel.TerminalOutputMsg:
 		if typed.SessionID == m.activeSessionID {
 			m.logger.Debug("terminal output", "session_id", typed.SessionID, "bytes", len(typed.Data))
 		}
 
-	case model.TerminalInputForwardedMsg:
+	case tuimodel.TerminalInputForwardedMsg:
 		if typed.Err != nil {
 			m.logger.Error("terminal input forwarding failed", "session_id", typed.SessionID, "error", sanitizeError(typed.Err))
 			m.ensureSessionManager().CleanupClosed()
@@ -230,7 +408,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	case model.TerminalClosedMsg:
+	case tuimodel.TerminalClosedMsg:
 		m.logger.Info("terminal closed", "session_id", typed.SessionID, "active_session_id", m.activeSessionID, "has_error", typed.Err != nil)
 		m.ensureSessionManager().CleanupClosed()
 		if typed.SessionID == m.activeSessionID {
@@ -249,7 +427,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	case model.AttachFinishedMsg:
+	case tuimodel.AttachFinishedMsg:
 		if typed.Err != nil {
 			m.logger.Info("attach finished", "status", "error")
 			m.logger.Error("session attach failed", "error", sanitizeError(typed.Err))
@@ -261,24 +439,24 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, toastCmd)
 			}
 		}
-		cmds = append(cmds, m.refreshCmd())
+		cmds = append(cmds, m.discoverCmd())
 
-	case model.ModalConfirmCreateMsg:
+	case tuimodel.ModalConfirmCreateMsg:
 		if host := m.findHostByName(typed.HostName); host != nil {
 			cmds = append(cmds, m.createSessionCmd(*host, typed.Directory))
 		}
 
-	case model.ModalConfirmNewDirMsg:
+	case tuimodel.ModalConfirmNewDirMsg:
 		if host := m.findHostByName(typed.HostName); host != nil {
 			cmds = append(cmds, m.createSessionCmd(*host, typed.Directory))
 		}
 
-	case model.ModalConfirmGitCloneMsg:
+	case tuimodel.ModalConfirmGitCloneMsg:
 		if host := m.findHostByName(typed.HostName); host != nil {
 			cmds = append(cmds, m.gitCloneSessionCmd(*host, typed.GitURL))
 		}
 
-	case model.ModalConfirmKillMsg:
+	case tuimodel.ModalConfirmKillMsg:
 		if host := m.findHostByName(typed.HostName); host != nil {
 			if manager := m.ensureSessionManager(); manager.Get(typed.SessionID) != nil {
 				manager.Remove(typed.SessionID)
@@ -291,7 +469,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.killSessionCmd(*host, typed.SessionID, typed.Directory, typed.SaveContext))
 		}
 
-	case model.ModalConfirmReloadMsg:
+	case tuimodel.ModalConfirmReloadMsg:
 		if m.reloadInProgress {
 			break
 		}
@@ -307,7 +485,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.reloadSessionsCmd(*host, directory))
 		}
 
-	case model.CreateSessionFinishedMsg:
+	case tuimodel.CreateSessionFinishedMsg:
 		if typed.Err != nil {
 			m.logger.Info("create session finished", "status", "error")
 			m.logger.Error("session create failed", "error", sanitizeError(typed.Err))
@@ -319,9 +497,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, toastCmd)
 			}
 		}
-		cmds = append(cmds, m.refreshCmd())
+		cmds = append(cmds, m.discoverCmd())
 
-	case model.KillSessionFinishedMsg:
+	case tuimodel.KillSessionFinishedMsg:
 		if typed.Err != nil {
 			m.logger.Info("delete session finished", "status", "error")
 			m.logger.Error("session delete failed", "error", sanitizeError(typed.Err))
@@ -342,9 +520,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.resize(m.width, m.height)
 		}
-		cmds = append(cmds, m.refreshCmd())
+		cmds = append(cmds, m.discoverCmd())
 
-	case model.ReloadSessionsFinishedMsg:
+	case tuimodel.ReloadSessionsFinishedMsg:
 		m.reloadInProgress = false
 		if typed.Err != nil {
 			m.logger.Info("reload sessions finished", "status", "error")
@@ -363,9 +541,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.resize(m.width, m.height)
 		}
-		cmds = append(cmds, m.refreshCmd())
+		cmds = append(cmds, m.discoverCmd())
 
-	case model.GitCloneFinishedMsg:
+	case tuimodel.GitCloneFinishedMsg:
 		if typed.Err != nil {
 			m.logger.Info("git clone finished", "status", "error")
 			m.logger.Error("session git clone failed", "error", sanitizeError(typed.Err))
@@ -377,7 +555,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, toastCmd)
 			}
 		}
-		cmds = append(cmds, m.refreshCmd())
+		cmds = append(cmds, m.discoverCmd())
 
 	case tea.KeyPressMsg:
 		if m.activeView == viewTerminal {
@@ -403,7 +581,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				sessionID := m.activeSessionID
 				cmds = append(cmds, func() tea.Msg {
 					if err := terminal.WriteInput(input); err != nil {
-						return model.TerminalInputForwardedMsg{SessionID: sessionID, Err: err}
+						return tuimodel.TerminalInputForwardedMsg{SessionID: sessionID, Err: err}
 					}
 					return nil
 				})
@@ -427,11 +605,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case keys.Matches(typed.String(), m.keys.Quit):
 			m.logger.Debug("update message", "message_type", "KeyPressMsg", "category", "quit")
+			m.stopLocalHostProvider()
 			m.ensureSessionManager().Shutdown()
 			return m, tea.Quit
 		case keys.Matches(typed.String(), m.keys.Refresh):
 			keyCategory = "refresh"
-			cmds = append(cmds, m.refreshCmd())
+			cmds = append(cmds, m.discoverCmd())
 		case keys.Matches(typed.String(), m.keys.Search):
 			keyCategory = "search"
 			m.header.FocusSearch()
@@ -584,51 +763,63 @@ func (m *AppModel) View() tea.View {
 	return v
 }
 
-func (m *AppModel) refreshCmd() tea.Cmd {
+func (m *AppModel) discoverCmd() tea.Cmd {
 	discoverer := m.discovery
-	proberSvc := m.prober
 	timeout := m.cfg.Polling.Timeout
 
 	return func() tea.Msg {
 		startedAt := time.Now()
-		m.logger.Info("refresh started", "timeout", timeout)
+		m.logger.Info("discovery started", "timeout", timeout)
 
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
-		hosts, discoverErr := discoverer.Discover(ctx)
-		probed, probeErr := proberSvc.ProbeHosts(ctx, hosts)
-
-		resultErr := probeErr
-		if discoverErr != nil {
-			resultErr = errors.Join(discoverErr, probeErr)
-		}
+		hosts, err := discoverer.Discover(ctx)
 
 		elapsed := time.Since(startedAt)
-		errCount := countRefreshErrors(probed, resultErr)
-		m.logger.Info("refresh complete", "hosts", len(probed), "duration", elapsed, "errors", errCount)
-		if resultErr != nil {
-			m.logger.Error(
-				"refresh failed",
-				"error", sanitizeError(resultErr),
-				"discover_error", discoverErr != nil,
-				"probe_error", probeErr != nil,
-			)
+		m.logger.Info("discovery complete", "hosts", len(hosts), "duration", elapsed, "has_error", err != nil)
+		if err != nil {
+			m.logger.Error("discovery failed", "error", sanitizeError(err))
 		}
 
-		return model.ProbeResultMsg{
+		return tuimodel.DiscoveryResultMsg{Hosts: hosts, Err: err}
+	}
+}
+
+func (m *AppModel) probeCmd(hosts []model.Host) tea.Cmd {
+	proberSvc := m.prober
+	timeout := m.cfg.Polling.Timeout
+	probeHosts := append([]model.Host(nil), hosts...)
+
+	return func() tea.Msg {
+		startedAt := time.Now()
+		m.logger.Info("probe started", "hosts", len(probeHosts), "timeout", timeout)
+
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		probed, probeErr := proberSvc.ProbeHosts(ctx, probeHosts)
+
+		elapsed := time.Since(startedAt)
+		errCount := countRefreshErrors(probed, probeErr)
+		m.logger.Info("probe complete", "hosts", len(probed), "duration", elapsed, "errors", errCount)
+		if probeErr != nil {
+			m.logger.Error("probe failed", "error", sanitizeError(probeErr))
+		}
+
+		return tuimodel.ProbeResultMsg{
 			Hosts:       probed,
-			Err:         resultErr,
+			Err:         probeErr,
 			RefreshedAt: time.Now(),
 		}
 	}
 }
 
-func (m *AppModel) applyProbeResult(msg model.ProbeResultMsg) tea.Cmd {
+func (m *AppModel) applyProbeResult(msg tuimodel.ProbeResultMsg) tea.Cmd {
 	hostsBefore := len(m.hosts)
 	errorsBefore := countHostErrors(m.hosts)
 
-	m.hosts = append([]model.Host(nil), msg.Hosts...)
+	m.hosts = m.withLocalHost(msg.Hosts)
 	m.tree.SetHosts(m.hosts)
 	stats := calculateFleetStats(m.hosts)
 	m.header.SetStats(stats)
@@ -728,10 +919,76 @@ func calculateFleetStats(hosts []model.Host) components.FleetStats {
 	return stats
 }
 
+func (m *AppModel) withLocalHost(hosts []model.Host) []model.Host {
+	merged := append([]model.Host(nil), hosts...)
+	if m == nil || m.localHostProvider == nil {
+		return merged
+	}
+
+	localHost, err := m.localHostProvider.LocalHost()
+	if err != nil {
+		if !errors.Is(err, local.ErrNoLocalBackends) {
+			m.logger.Debug("local host snapshot failed", "error", sanitizeError(err))
+		}
+		return merged
+	}
+	if localHost == nil {
+		return merged
+	}
+
+	localName := strings.TrimSpace(localHost.Name)
+	if localName == "" {
+		return merged
+	}
+
+	filtered := make([]model.Host, 0, len(merged))
+	for _, host := range merged {
+		if strings.EqualFold(strings.TrimSpace(host.Name), localName) {
+			continue
+		}
+		filtered = append(filtered, host)
+	}
+
+	return append([]model.Host{*localHost}, filtered...)
+}
+
+func (m *AppModel) stopLocalHostProvider() {
+	if m == nil || m.localHostProvider == nil {
+		return
+	}
+	m.localHostProvider.Stop()
+}
+
+func localRegistryStaleAfter(scanInterval time.Duration) time.Duration {
+	if scanInterval <= 0 {
+		return 30 * time.Second
+	}
+
+	staleAfter := scanInterval * 2
+	if staleAfter < 30*time.Second {
+		return 30 * time.Second
+	}
+
+	return staleAfter
+}
+
 func tickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
-		return model.TickMsg{Now: t}
+		return tuimodel.TickMsg{Now: t}
 	})
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a <= 0 {
+		return b
+	}
+	if b <= 0 {
+		return a
+	}
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func maxInt(a, b int) int {
@@ -1033,7 +1290,7 @@ func (m *AppModel) createSessionCmd(host model.Host, directory string) tea.Cmd {
 
 	c := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-t", host.Name, remoteCmd)
 	return tea.ExecProcess(c, func(err error) tea.Msg {
-		return model.CreateSessionFinishedMsg{Err: err}
+		return tuimodel.CreateSessionFinishedMsg{Err: err}
 	})
 }
 
@@ -1105,32 +1362,32 @@ fi`,
 		if saveContext {
 			exportPath, err := defaultSessionExportPath(host.Name, sessionID)
 			if err != nil {
-				return model.KillSessionFinishedMsg{Err: err}
+				return tuimodel.KillSessionFinishedMsg{Err: err}
 			}
 
 			exportJSON, err := runSSHCommand(host.Name, exportRemoteCmd)
 			if err != nil {
-				return model.KillSessionFinishedMsg{Err: fmt.Errorf("export session %s: %w", sessionID, err)}
+				return tuimodel.KillSessionFinishedMsg{Err: fmt.Errorf("export session %s: %w", sessionID, err)}
 			}
 			if strings.TrimSpace(string(exportJSON)) == "" {
-				return model.KillSessionFinishedMsg{Err: fmt.Errorf("export session %s: empty export output", sessionID)}
+				return tuimodel.KillSessionFinishedMsg{Err: fmt.Errorf("export session %s: empty export output", sessionID)}
 			}
 
 			if err := os.WriteFile(exportPath, exportJSON, 0o600); err != nil {
-				return model.KillSessionFinishedMsg{Err: fmt.Errorf("save export %q: %w", exportPath, err)}
+				return tuimodel.KillSessionFinishedMsg{Err: fmt.Errorf("save export %q: %w", exportPath, err)}
 			}
 			savedExportPath = exportPath
 		}
 
 		if _, err := runSSHCommand(host.Name, deleteRemoteCmd); err != nil {
-			return model.KillSessionFinishedMsg{Err: fmt.Errorf("delete session %s: %w", sessionID, err), SavedExportPath: savedExportPath}
+			return tuimodel.KillSessionFinishedMsg{Err: fmt.Errorf("delete session %s: %w", sessionID, err), SavedExportPath: savedExportPath}
 		}
 
 		if _, err := runSSHCommand(host.Name, cleanupRemoteCmd); err != nil {
-			return model.KillSessionFinishedMsg{Err: fmt.Errorf("verify remote session process cleanup for %s: %w", sessionID, err), SavedExportPath: savedExportPath}
+			return tuimodel.KillSessionFinishedMsg{Err: fmt.Errorf("verify remote session process cleanup for %s: %w", sessionID, err), SavedExportPath: savedExportPath}
 		}
 
-		return model.KillSessionFinishedMsg{SavedExportPath: savedExportPath}
+		return tuimodel.KillSessionFinishedMsg{SavedExportPath: savedExportPath}
 	}
 }
 
@@ -1247,7 +1504,7 @@ printf 'reload:remaining:%%s\n' "$remaining"`, directory)
 			err = fmt.Errorf("%d process(es) remain after reload kill sweep", remainingCount)
 		}
 
-		return model.ReloadSessionsFinishedMsg{
+		return tuimodel.ReloadSessionsFinishedMsg{
 			HostName:    host.Name,
 			Directory:   directory,
 			Err:         err,
@@ -1272,7 +1529,7 @@ func (m *AppModel) gitCloneSessionCmd(host model.Host, gitURL string) tea.Cmd {
 
 	c := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-t", host.Name, remoteCmd)
 	return tea.ExecProcess(c, func(err error) tea.Msg {
-		return model.GitCloneFinishedMsg{Err: err}
+		return tuimodel.GitCloneFinishedMsg{Err: err}
 	})
 }
 

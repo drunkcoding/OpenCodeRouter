@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,18 +25,28 @@ func fakeOpenCode(healthy bool, projectName, projectPath, version string) *httpt
 	mux := http.NewServeMux()
 	mux.HandleFunc("/global/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
 			"healthy": healthy,
 			"version": version,
-		})
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	})
 	mux.HandleFunc("/project/current", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
 			"id":   projectName,
 			"name": projectName,
 			"path": projectPath,
-		})
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+	mux.HandleFunc("/session", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode([]map[string]interface{}{}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	})
 	return httptest.NewServer(mux)
 }
@@ -124,10 +135,12 @@ func TestProbePort_NoServer(t *testing.T) {
 func TestProbePort_HealthOK_ProjectFails(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/global/health", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
 			"healthy": true,
 			"version": "1.0.0",
-		})
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	})
 	mux.HandleFunc("/project/current", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -154,7 +167,9 @@ func TestProbePort_HealthOK_ProjectFails(t *testing.T) {
 func TestProbePort_MalformedHealth(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/global/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("not json"))
+		if _, err := w.Write([]byte("not json")); err != nil {
+			t.Logf("write failed: %v", err)
+		}
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -201,14 +216,18 @@ func TestProbePort_HealthNon200(t *testing.T) {
 func TestProbePort_FallbackToID(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/global/health", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{"healthy": true, "version": "1.0"})
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{"healthy": true, "version": "1.0"}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	})
 	mux.HandleFunc("/project/current", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
 			"id":   "fallback-id",
 			"name": "",
 			"path": "",
-		})
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -229,6 +248,154 @@ func TestProbePort_FallbackToID(t *testing.T) {
 	}
 	if b.ProjectName != "fallback-id" {
 		t.Errorf("expected project name 'fallback-id', got %q", b.ProjectName)
+	}
+}
+
+func TestProbePort_SessionDiscovery(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/global/health", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{"healthy": true, "version": "1.1.0"}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+	mux.HandleFunc("/project/current", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":   "proj",
+			"name": "proj",
+			"path": "/home/test/proj",
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+	mux.HandleFunc("/session", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
+			"sessions": []map[string]interface{}{
+				{"id": "s-1", "title": "first", "directory": "/home/test/proj", "status": "active", "attached_clients": 2},
+			},
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	port := extractPort(t, srv.URL)
+	reg := registry.New(30*time.Second, testLogger())
+	sc := New(reg, port, port, 5*time.Second, 1, 2*time.Second, testLogger())
+
+	sc.probePort(context.Background(), port)
+
+	sessions := reg.ListSessions("proj")
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].ID != "s-1" {
+		t.Fatalf("expected session id s-1, got %q", sessions[0].ID)
+	}
+	if sessions[0].AttachedClients != 2 {
+		t.Fatalf("expected attached clients 2, got %d", sessions[0].AttachedClients)
+	}
+}
+
+func TestScan_SessionDisappearanceAcrossCycles(t *testing.T) {
+	var (
+		mu       sync.RWMutex
+		sessions = []map[string]interface{}{
+			{"id": "s-1", "title": "first"},
+			{"id": "s-2", "title": "second"},
+		}
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/global/health", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{"healthy": true, "version": "1.0.0"}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+	mux.HandleFunc("/project/current", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{"id": "proj", "name": "proj", "path": "/home/test/proj"}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+	mux.HandleFunc("/session", func(w http.ResponseWriter, r *http.Request) {
+		mu.RLock()
+		defer mu.RUnlock()
+		copied := make([]map[string]interface{}, len(sessions))
+		for i, session := range sessions {
+			clone := make(map[string]interface{}, len(session))
+			for k, v := range session {
+				clone[k] = v
+			}
+			copied[i] = clone
+		}
+		if err := json.NewEncoder(w).Encode(copied); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	port := extractPort(t, srv.URL)
+	reg := registry.New(30*time.Second, testLogger())
+	sc := New(reg, port, port, 5*time.Second, 1, 2*time.Second, testLogger())
+
+	sc.scan(context.Background())
+	if got := len(reg.ListSessions("proj")); got != 2 {
+		t.Fatalf("expected 2 sessions after first scan, got %d", got)
+	}
+
+	mu.Lock()
+	sessions = []map[string]interface{}{{"id": "s-2", "title": "second"}}
+	mu.Unlock()
+
+	sc.scan(context.Background())
+	list := reg.ListSessions("proj")
+	if len(list) != 1 {
+		t.Fatalf("expected 1 session after second scan, got %d", len(list))
+	}
+	if list[0].ID != "s-2" {
+		t.Fatalf("expected remaining session s-2, got %q", list[0].ID)
+	}
+}
+
+func TestProbePort_ProjectPayloadDeltaWorktreeSandboxes(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/global/health", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{"healthy": true, "version": "1.0"}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+	mux.HandleFunc("/project/current", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
+			"worktree":  map[string]interface{}{"path": "/home/test/delta-proj"},
+			"sandboxes": []map[string]interface{}{{"path": "/home/test/delta-proj"}},
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+	mux.HandleFunc("/session", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{"sessions": []map[string]interface{}{}}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	port := extractPort(t, srv.URL)
+	reg := registry.New(30*time.Second, testLogger())
+	sc := New(reg, port, port, 5*time.Second, 1, 2*time.Second, testLogger())
+
+	sc.probePort(context.Background(), port)
+
+	b, ok := reg.Lookup("delta-proj")
+	if !ok {
+		t.Fatal("expected backend registered from worktree/sandboxes payload")
+	}
+	if b.ProjectPath != "/home/test/delta-proj" {
+		t.Fatalf("expected project path from delta payload, got %q", b.ProjectPath)
 	}
 }
 

@@ -1,6 +1,10 @@
 package model
 
-import "time"
+import (
+	"time"
+
+	"opencoderouter/internal/registry"
+)
 
 // ActivityState captures a high-level activity bucket for a session.
 type ActivityState string
@@ -15,6 +19,33 @@ const (
 	// ActivityUnknown marks sessions where activity cannot be derived.
 	ActivityUnknown ActivityState = "UNKNOWN"
 )
+
+// SessionState captures lifecycle state for control-plane sessions.
+type SessionState string
+
+const (
+	SessionStateActive  SessionState = "active"
+	SessionStateIdle    SessionState = "idle"
+	SessionStateStopped SessionState = "stopped"
+	SessionStateError   SessionState = "error"
+)
+
+// AttachMode identifies which client surface is attached to a session.
+type AttachMode string
+
+const (
+	AttachModeTerminal AttachMode = "terminal"
+	AttachModeBrowser  AttachMode = "browser"
+	AttachModeVSCode   AttachMode = "vscode"
+)
+
+// DaemonInfo describes a managed OpenCode daemon instance.
+type DaemonInfo struct {
+	Port    int    `json:"port"`
+	PID     int    `json:"pid"`
+	Health  bool   `json:"health"`
+	Version string `json:"version"`
+}
 
 // HostStatus represents remote availability from probe/discovery.
 type HostStatus string
@@ -85,6 +116,12 @@ type Session struct {
 	MessageCount int
 	Agents       []string
 	Activity     ActivityState
+}
+
+// BackendSession combines a discovered backend with its sessions.
+type BackendSession struct {
+	Backend  registry.Backend `json:"backend"`
+	Sessions []Session        `json:"sessions"`
 }
 
 // JumpHop represents one hop in a ProxyJump chain.

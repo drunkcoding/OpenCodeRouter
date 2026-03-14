@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"opencoderouter/internal/tui/model"
+	tuimodel "opencoderouter/internal/tui/model"
 	"opencoderouter/internal/tui/theme"
 
 	tea "charm.land/bubbletea/v2"
@@ -58,7 +58,7 @@ func (t *InlineToast) Show(message string, severity ToastSeverity, timeout time.
 	}
 
 	return tea.Tick(timeout, func(_ time.Time) tea.Msg {
-		return model.ToastExpiredMsg{Token: currentToken}
+		return tuimodel.ToastExpiredMsg{Token: currentToken}
 	})
 }
 
@@ -73,7 +73,7 @@ func (t InlineToast) Visible() bool {
 }
 
 func (t InlineToast) Update(msg tea.Msg) (InlineToast, tea.Cmd) {
-	typed, ok := msg.(model.ToastExpiredMsg)
+	typed, ok := msg.(tuimodel.ToastExpiredMsg)
 	if !ok {
 		return t, nil
 	}

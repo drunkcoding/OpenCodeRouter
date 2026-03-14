@@ -6,8 +6,8 @@ import (
 	"sort"
 	"sync"
 
+	"opencoderouter/internal/model"
 	"opencoderouter/internal/tui/components"
-	"opencoderouter/internal/tui/model"
 
 	tea "charm.land/bubbletea/v2"
 )
