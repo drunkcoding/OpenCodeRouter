@@ -70,7 +70,7 @@ if [ "$#" -lt 2 ]; then
   exit 2
 fi
 shift
-exec /bin/sh -lc "$1"
+exec /bin/sh -c "$1"
 `
 	opencodeScript := `#!/bin/sh
 set -eu

@@ -117,6 +117,8 @@ type probeResult struct {
 	err   error
 }
 
+const opencodeMissingSentinel = "__OCR_OPENCODE_MISSING__"
+
 func (s *ProbeService) ProbeHosts(ctx context.Context, hosts []model.Host) ([]model.Host, error) {
 	startedAt := time.Now()
 	workerCount := s.opts.MaxParallel
@@ -150,13 +152,16 @@ func (s *ProbeService) ProbeHosts(ctx context.Context, hosts []model.Host) ([]mo
 	}
 
 	updated := make([]model.Host, len(hosts))
+	copy(updated, hosts)
 	jobs := make(chan probeJob)
 	results := make(chan probeResult)
 
 	for i := 0; i < workerCount; i++ {
 		go func() {
 			for job := range jobs {
-				h, err := s.probeHost(ctx, job.host)
+				jobCtx, cancel := s.hostProbeContext(ctx)
+				h, err := s.probeHost(jobCtx, job.host)
+				cancel()
 				results <- probeResult{index: job.index, host: h, err: err}
 			}
 		}()
@@ -219,6 +224,13 @@ func (s *ProbeService) ProbeHosts(ctx context.Context, hosts []model.Host) ([]mo
 	return updated, nil
 }
 
+func (s *ProbeService) hostProbeContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if s.opts.SSH.ConnectTimeout <= 0 {
+		return parent, func() {}
+	}
+	return context.WithTimeout(parent, time.Duration(s.opts.SSH.ConnectTimeout)*time.Second)
+}
+
 func (s *ProbeService) scanPathsForHost(host model.Host) []string {
 	if override, ok := s.opts.Overrides[host.Name]; ok && len(override.ScanPaths) > 0 {
 		return override.ScanPaths
@@ -243,8 +255,8 @@ func (s *ProbeService) buildRemoteCmd(host model.Host) string {
 			`if [ -x "$OC" ]; then `+
 			`find %s -maxdepth 2 -name .opencode -type d 2>/dev/null | while IFS= read -r d; do `+
 			`(cd "$(dirname "$d")" && "$OC" session list --format json 2>/dev/null); `+
-			`done; fi`,
-		bin, bin, pathList,
+			`done; else printf '%s\n'; fi`,
+		bin, bin, pathList, opencodeMissingSentinel,
 	)
 
 	s.logger.Debug("probe remote command built",
@@ -266,44 +278,31 @@ func (s *ProbeService) probeHost(ctx context.Context, host model.Host) (model.Ho
 		"arg_count", len(args),
 	)
 
-	out, err := s.runner.Run(ctx, "ssh", args...)
-	if err != nil {
-		if isAuthError(host.Name, err, s.logger) {
-			host.Status = model.HostStatusAuthRequired
-			host.LastError = "password authentication required"
-			s.logger.Error("probe host failed",
-				"host", host.Name,
-				"status", host.Status,
-				"err_kind", "auth",
-				"error", sanitizeErrorContext(err),
-				"duration_ms", time.Since(startedAt).Milliseconds(),
-			)
-			return host, fmt.Errorf("probe host %q: auth required", host.Name)
-		}
-		host.Status = model.HostStatusOffline
-		host.LastError = err.Error()
-		s.logger.Error("probe host failed",
-			"host", host.Name,
-			"status", host.Status,
-			"err_kind", errorKind(err),
-			"error", sanitizeErrorContext(err),
-			"duration_ms", time.Since(startedAt).Milliseconds(),
-		)
-		return host, fmt.Errorf("probe host %q: %w", host.Name, err)
+	out, runErr := s.runner.Run(ctx, "ssh", args...)
+	var sessions []model.Session
+	var parseErr error
+	if runErr == nil && strings.TrimSpace(string(out)) != opencodeMissingSentinel {
+		sessions, parseErr = s.parseSessions(out, host.Name)
 	}
 
-	sessions, parseErr := s.parseSessions(out, host.Name)
-	if parseErr != nil {
-		host.Status = model.HostStatusError
-		host.LastError = parseErr.Error()
+	result := classifyProbeResult(
+		host.Name,
+		out,
+		runErr,
+		parseErr,
+		runErr != nil && isAuthError(host.Name, runErr, s.logger),
+	)
+	if result.err != nil {
+		host.Status = result.status
+		host.LastError = result.lastError
 		s.logger.Error("probe host failed",
 			"host", host.Name,
 			"status", host.Status,
-			"err_kind", errorKind(parseErr),
-			"error", sanitizeErrorContext(parseErr),
+			"err_kind", result.errKind,
+			"error", result.logError,
 			"duration_ms", time.Since(startedAt).Milliseconds(),
 		)
-		return host, fmt.Errorf("parse sessions for %q: %w", host.Name, parseErr)
+		return host, result.err
 	}
 
 	if s.opts.MaxDisplay > 0 && len(sessions) > s.opts.MaxDisplay {
@@ -311,7 +310,7 @@ func (s *ProbeService) probeHost(ctx context.Context, host model.Host) (model.Ho
 	}
 
 	host.Projects = groupSessionsByProject(sessions)
-	host.Status = model.HostStatusOnline
+	host.Status = result.status
 	host.LastSeen = s.nowFn()
 	host.LastError = ""
 	s.logger.Debug("probe host completed",
@@ -322,6 +321,58 @@ func (s *ProbeService) probeHost(ctx context.Context, host model.Host) (model.Ho
 	)
 
 	return host, nil
+}
+
+type probeClassification struct {
+	status    model.HostStatus
+	lastError string
+	err       error
+	errKind   string
+	logError  string
+}
+
+func classifyProbeResult(hostName string, output []byte, runErr, parseErr error, authRequired bool) probeClassification {
+	if runErr != nil {
+		if authRequired {
+			return probeClassification{
+				status:    model.HostStatusAuthRequired,
+				lastError: "password authentication required",
+				err:       fmt.Errorf("probe host %q: auth required", hostName),
+				errKind:   "auth",
+				logError:  "authentication failed",
+			}
+		}
+		return probeClassification{
+			status:    model.HostStatusOffline,
+			lastError: runErr.Error(),
+			err:       fmt.Errorf("probe host %q: %w", hostName, runErr),
+			errKind:   errorKind(runErr),
+			logError:  sanitizeErrorContext(runErr),
+		}
+	}
+
+	if strings.TrimSpace(string(output)) == opencodeMissingSentinel {
+		err := fmt.Errorf("probe host %q: opencode binary not found", hostName)
+		return probeClassification{
+			status:    model.HostStatusOffline,
+			lastError: "opencode binary not found",
+			err:       err,
+			errKind:   "opencode_missing",
+			logError:  "opencode binary not found",
+		}
+	}
+
+	if parseErr != nil {
+		return probeClassification{
+			status:    model.HostStatusError,
+			lastError: parseErr.Error(),
+			err:       fmt.Errorf("parse sessions for %q: %w", hostName, parseErr),
+			errKind:   errorKind(parseErr),
+			logError:  sanitizeErrorContext(parseErr),
+		}
+	}
+
+	return probeClassification{status: model.HostStatusOnline}
 }
 
 func (s *ProbeService) buildSSHArgs(host model.Host, remoteCmd string) []string {

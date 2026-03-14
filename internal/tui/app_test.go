@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -52,11 +53,111 @@ func (fakeProber) ProbeHosts(_ context.Context, hosts []model.Host) ([]model.Hos
 	return []model.Host{host}, nil
 }
 
+type trackingProber struct {
+	hostsToReturn []model.Host
+	err           error
+
+	calls     int
+	lastHosts []model.Host
+}
+
+func (p *trackingProber) ProbeHosts(_ context.Context, hosts []model.Host) ([]model.Host, error) {
+	p.calls++
+	p.lastHosts = append([]model.Host(nil), hosts...)
+	if p.hostsToReturn != nil || p.err != nil {
+		return append([]model.Host(nil), p.hostsToReturn...), p.err
+	}
+	return append([]model.Host(nil), hosts...), nil
+}
+
+type fakeLocalHostProvider struct {
+	mu sync.Mutex
+
+	host *model.Host
+	err  error
+
+	startCalls int
+	stopCalls  int
+}
+
+func (f *fakeLocalHostProvider) Start() {
+	f.mu.Lock()
+	f.startCalls++
+	f.mu.Unlock()
+}
+
+func (f *fakeLocalHostProvider) Stop() {
+	f.mu.Lock()
+	f.stopCalls++
+	f.mu.Unlock()
+}
+
+func (f *fakeLocalHostProvider) LocalHost() (*model.Host, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.host == nil {
+		return nil, f.err
+	}
+	hostCopy := *f.host
+	return &hostCopy, f.err
+}
+
+type blockingLocalHostProvider struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func newBlockingLocalHostProvider() *blockingLocalHostProvider {
+	return &blockingLocalHostProvider{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (b *blockingLocalHostProvider) Start() {
+	select {
+	case <-b.started:
+	default:
+		close(b.started)
+	}
+	<-b.release
+}
+
+func (b *blockingLocalHostProvider) Stop() {
+	select {
+	case <-b.release:
+	default:
+		close(b.release)
+	}
+}
+
+func (b *blockingLocalHostProvider) LocalHost() (*model.Host, error) {
+	return nil, nil
+}
+
+func localHostFixture() model.Host {
+	return model.Host{
+		Name:   "localhost",
+		Label:  "localhost (local)",
+		Status: model.HostStatusOnline,
+		Projects: []model.Project{{
+			Name: "alpha-local",
+			Sessions: []model.Session{{
+				ID:       "local-1",
+				Project:  "alpha-local",
+				Title:    "local session",
+				Activity: model.ActivityActive,
+			}},
+		}},
+	}
+}
+
 func TestAppSmoke(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Display.Animation = false
 
 	app := NewApp(cfg, fakeDiscoverer{hosts: []model.Host{{Name: "dev-1", Label: "dev-1"}}}, fakeProber{}, nil)
+	app.localHostProvider = &fakeLocalHostProvider{}
 	initCmd := app.Init()
 	if initCmd == nil {
 		t.Fatal("expected init command")
@@ -95,6 +196,7 @@ func TestNewApp_LoggerPropagated(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	app := NewApp(cfg, fakeDiscoverer{}, fakeProber{}, logger)
+	app.localHostProvider = &fakeLocalHostProvider{}
 	if app.logger == nil {
 		t.Fatal("expected app logger to be initialized")
 	}
@@ -102,6 +204,377 @@ func TestNewApp_LoggerPropagated(t *testing.T) {
 	_ = app.Init()
 	if !strings.Contains(buf.String(), "component=app") {
 		t.Fatal("expected app logger output to include component field")
+	}
+}
+
+func TestInit_DispatchesDiscoveryCmd(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Display.Animation = false
+
+	app := NewApp(cfg, fakeDiscoverer{hosts: []model.Host{{Name: "dev-1", Label: "dev-1"}}}, fakeProber{}, nil)
+	app.localHostProvider = &fakeLocalHostProvider{}
+	initCmd := app.Init()
+	if initCmd == nil {
+		t.Fatal("expected init command")
+	}
+
+	msg, ok := runCmdWithTimeout(initCmd, 200*time.Millisecond)
+	if !ok {
+		t.Fatal("init command timed out")
+	}
+
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("init message type = %T, want tea.BatchMsg", msg)
+	}
+	if !batchContainsDiscoveryResult(batch) {
+		t.Fatal("expected init batch to include discoverCmd")
+	}
+	if batchContainsProbeResult(batch) {
+		t.Fatal("init should not dispatch probe result directly")
+	}
+}
+
+func TestInit_StartsLocalProviderWithoutBlocking(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	cfg.Display.Animation = false
+
+	app := NewApp(cfg, fakeDiscoverer{}, fakeProber{}, nil)
+	blockingProvider := newBlockingLocalHostProvider()
+	app.localHostProvider = blockingProvider
+
+	initDone := make(chan tea.Cmd, 1)
+	go func() {
+		initDone <- app.Init()
+	}()
+
+	select {
+	case cmd := <-initDone:
+		if cmd == nil {
+			t.Fatal("expected init command")
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Init blocked while local provider start was waiting")
+	}
+
+	select {
+	case <-blockingProvider.started:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected local provider Start to be invoked asynchronously")
+	}
+
+	blockingProvider.Stop()
+}
+
+func TestUpdate_RefreshKeyDispatchesDiscoveryCmd(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Display.Animation = false
+
+	app := NewApp(cfg, fakeDiscoverer{hosts: []model.Host{{Name: "dev-1", Label: "dev-1"}}}, fakeProber{}, nil)
+
+	_, cmd := app.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	if cmd == nil {
+		t.Fatal("expected refresh key to dispatch command")
+	}
+
+	msg, ok := runCmdWithTimeout(cmd, 200*time.Millisecond)
+	if !ok {
+		t.Fatal("refresh command timed out")
+	}
+
+	switch typed := msg.(type) {
+	case tuimodel.DiscoveryResultMsg:
+	case tea.BatchMsg:
+		if !batchContainsDiscoveryResult(typed) {
+			t.Fatalf("expected refresh command batch to include discovery, got %T", msg)
+		}
+	default:
+		t.Fatalf("refresh command message type = %T, want DiscoveryResultMsg or tea.BatchMsg", msg)
+	}
+}
+
+func TestUpdate_DiscoveryResultDispatchesProbeAndStoresHosts(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Display.Animation = false
+
+	prober := &trackingProber{hostsToReturn: []model.Host{{Name: "dev-1", Label: "dev-1", Status: model.HostStatusOnline}}}
+	app := NewApp(cfg, fakeDiscoverer{}, prober, nil)
+
+	discovered := []model.Host{{Name: "dev-1", Label: "dev-1", Status: model.HostStatusUnknown}}
+	_, cmd := app.Update(tuimodel.DiscoveryResultMsg{Hosts: discovered})
+
+	if len(app.hosts) != 1 || app.hosts[0].Name != "dev-1" {
+		t.Fatalf("app.hosts after discovery = %#v, want discovered hosts copied", app.hosts)
+	}
+	if cmd == nil {
+		t.Fatal("expected discovery result to dispatch probe command")
+	}
+
+	msg, ok := runCmdWithTimeout(cmd, 200*time.Millisecond)
+	if !ok {
+		t.Fatal("probe dispatch command timed out")
+	}
+
+	switch typed := msg.(type) {
+	case tuimodel.ProbeResultMsg:
+		if len(typed.Hosts) != 1 || typed.Hosts[0].Name != "dev-1" {
+			t.Fatalf("probe result hosts = %#v, want host dev-1", typed.Hosts)
+		}
+	case tea.BatchMsg:
+		if !batchContainsProbeResult(typed) {
+			t.Fatalf("expected discovery command batch to include probe result, got %T", msg)
+		}
+	default:
+		t.Fatalf("discovery dispatch message type = %T, want ProbeResultMsg or tea.BatchMsg", msg)
+	}
+
+	if prober.calls != 1 {
+		t.Fatalf("probe call count = %d, want 1", prober.calls)
+	}
+	if len(prober.lastHosts) != 1 || prober.lastHosts[0].Name != "dev-1" {
+		t.Fatalf("probe input hosts = %#v, want discovered host", prober.lastHosts)
+	}
+}
+
+func TestUpdate_DiscoveryResultMergesLocalHostWithoutMutatingProbeInput(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	cfg.Display.Animation = false
+
+	prober := &trackingProber{hostsToReturn: []model.Host{{Name: "remote-1", Label: "remote-1", Status: model.HostStatusOnline}}}
+	app := NewApp(cfg, fakeDiscoverer{}, prober, nil)
+	localProvider := &fakeLocalHostProvider{host: hostPtr(localHostFixture())}
+	app.localHostProvider = localProvider
+
+	discovered := []model.Host{{Name: "remote-1", Label: "remote-1", Status: model.HostStatusUnknown}}
+	_, cmd := app.Update(tuimodel.DiscoveryResultMsg{Hosts: discovered})
+
+	if len(app.hosts) != 2 {
+		t.Fatalf("app.hosts count after local merge = %d, want 2", len(app.hosts))
+	}
+	if app.hosts[0].Name != "localhost" || app.hosts[1].Name != "remote-1" {
+		t.Fatalf("app.host ordering = [%q, %q], want [localhost, remote-1]", app.hosts[0].Name, app.hosts[1].Name)
+	}
+
+	if cmd == nil {
+		t.Fatal("expected discovery result to dispatch probe command")
+	}
+	if _, ok := runCmdWithTimeout(cmd, 200*time.Millisecond); !ok {
+		t.Fatal("probe command timed out")
+	}
+
+	if prober.calls != 1 {
+		t.Fatalf("prober call count = %d, want 1", prober.calls)
+	}
+	if len(prober.lastHosts) != 1 || prober.lastHosts[0].Name != "remote-1" {
+		t.Fatalf("probe input hosts = %#v, want only remote host", prober.lastHosts)
+	}
+}
+
+func TestUpdate_ProbeResultMergesLocalHostIntoTree(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	cfg.Display.Animation = false
+
+	app := NewApp(cfg, fakeDiscoverer{}, fakeProber{}, nil)
+	localProvider := &fakeLocalHostProvider{host: hostPtr(localHostFixture())}
+	app.localHostProvider = localProvider
+
+	remoteHosts := []model.Host{{Name: "remote-1", Label: "remote-1", Status: model.HostStatusOnline}}
+	_, _ = app.Update(tuimodel.ProbeResultMsg{Hosts: remoteHosts, RefreshedAt: time.Now()})
+
+	if len(app.hosts) != 2 {
+		t.Fatalf("app.hosts count after probe merge = %d, want 2", len(app.hosts))
+	}
+	if app.hosts[0].Name != "localhost" || app.hosts[1].Name != "remote-1" {
+		t.Fatalf("app.host ordering = [%q, %q], want [localhost, remote-1]", app.hosts[0].Name, app.hosts[1].Name)
+	}
+
+	treeHosts := app.tree.Hosts()
+	if len(treeHosts) != 2 {
+		t.Fatalf("tree host count = %d, want 2", len(treeHosts))
+	}
+	if treeHosts[0].Name != "localhost" || treeHosts[1].Name != "remote-1" {
+		t.Fatalf("tree host ordering = [%q, %q], want [localhost, remote-1]", treeHosts[0].Name, treeHosts[1].Name)
+	}
+}
+
+func TestUpdate_DiscoveryResultNoRemoteHostsKeepsLocalAndSuppressesGuidanceToast(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	cfg.Display.Animation = false
+
+	app := NewApp(cfg, fakeDiscoverer{}, fakeProber{}, nil)
+	localProvider := &fakeLocalHostProvider{host: hostPtr(localHostFixture())}
+	app.localHostProvider = localProvider
+
+	_, cmd := app.Update(tuimodel.DiscoveryResultMsg{Hosts: nil})
+	if cmd != nil {
+		t.Fatal("expected no command when no remote hosts are discovered")
+	}
+
+	if len(app.hosts) != 1 || app.hosts[0].Name != "localhost" {
+		t.Fatalf("app.hosts = %#v, want local host only", app.hosts)
+	}
+	if app.toast.Visible() {
+		t.Fatalf("did not expect no-remote guidance toast when local host is available, got %q", app.toast.View())
+	}
+}
+
+func TestUpdate_QuitStopsLocalProvider(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	cfg.Display.Animation = false
+
+	app := NewApp(cfg, fakeDiscoverer{}, fakeProber{}, nil)
+	localProvider := &fakeLocalHostProvider{}
+	app.localHostProvider = localProvider
+
+	_, cmd := app.Update(tea.KeyPressMsg{Code: 'q', Text: "q"})
+	if cmd == nil {
+		t.Fatal("expected quit command")
+	}
+	quitMsg := cmd()
+	if _, ok := quitMsg.(tea.QuitMsg); !ok {
+		t.Fatalf("quit command result = %T, want tea.QuitMsg", quitMsg)
+	}
+
+	localProvider.mu.Lock()
+	stopCalls := localProvider.stopCalls
+	localProvider.mu.Unlock()
+	if stopCalls != 1 {
+		t.Fatalf("local provider stop call count = %d, want 1", stopCalls)
+	}
+}
+
+func TestUpdate_DiscoveryResultNoHostsShowsGuidanceToast(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Display.Animation = false
+
+	app := NewApp(cfg, fakeDiscoverer{}, fakeProber{}, nil)
+
+	_, cmd := app.Update(tuimodel.DiscoveryResultMsg{Hosts: nil})
+	if cmd == nil {
+		t.Fatal("expected zero-host discovery to dispatch toast command")
+	}
+	if !app.toast.Visible() {
+		t.Fatal("expected guidance toast when no hosts discovered")
+	}
+
+	toastView := strings.ToLower(app.toast.View())
+	if !strings.Contains(toastView, "no ssh hosts found") {
+		t.Fatalf("expected no-hosts guidance toast, got %q", toastView)
+	}
+	if !strings.Contains(toastView, "~/.ssh/config") {
+		t.Fatalf("expected ssh config guidance in toast, got %q", toastView)
+	}
+	if !strings.Contains(toastView, "hosts.include") {
+		t.Fatalf("expected hosts.include guidance in toast, got %q", toastView)
+	}
+}
+
+func TestUpdate_SSHErrorMsgShowsPerHostToast(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Display.Animation = false
+
+	app := NewApp(cfg, fakeDiscoverer{}, fakeProber{}, nil)
+
+	sshErr := errors.New("permission denied (publickey)")
+	_, cmd := app.Update(tuimodel.SSHErrorMsg{Host: "jump-1", Err: sshErr})
+	if cmd == nil {
+		t.Fatal("expected SSHErrorMsg handler to return toast command")
+	}
+	if !app.toast.Visible() {
+		t.Fatal("expected SSHErrorMsg to show toast")
+	}
+	if app.lastError == nil || !strings.Contains(app.lastError.Error(), "jump-1") {
+		t.Fatalf("expected lastError to capture host-scoped ssh failure, got %v", app.lastError)
+	}
+
+	toastView := strings.ToLower(app.toast.View())
+	if !strings.Contains(toastView, "error:") || !strings.Contains(toastView, "jump-1") || !strings.Contains(toastView, "permission denied") {
+		t.Fatalf("expected host-scoped ssh error toast, got %q", toastView)
+	}
+}
+
+func TestUpdate_TransportPreflightMsgUpdatesHostTransportState(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Display.Animation = false
+
+	app := NewApp(cfg, fakeDiscoverer{}, fakeProber{}, nil)
+	app.hosts = []model.Host{
+		{Name: "jump-1", Label: "jump-1", Status: model.HostStatusUnknown, Transport: model.TransportUnknown},
+		{Name: "target-1", Label: "target-1", Status: model.HostStatusUnknown, Transport: model.TransportUnknown},
+	}
+	app.tree.SetHosts(app.hosts)
+
+	preflightHosts := []model.Host{
+		{Name: "jump-1", Transport: model.TransportAuthRequired, TransportError: "password authentication required"},
+		{Name: "target-1", Transport: model.TransportBlocked, BlockedBy: []string{"jump-1"}, TransportError: "blocked by: jump-1"},
+	}
+
+	_, _ = app.Update(tuimodel.TransportPreflightMsg{Hosts: preflightHosts})
+
+	if app.hosts[0].Transport != model.TransportAuthRequired {
+		t.Fatalf("jump host transport = %q, want %q", app.hosts[0].Transport, model.TransportAuthRequired)
+	}
+	if app.hosts[1].Transport != model.TransportBlocked {
+		t.Fatalf("target host transport = %q, want %q", app.hosts[1].Transport, model.TransportBlocked)
+	}
+	if len(app.hosts[1].BlockedBy) != 1 || app.hosts[1].BlockedBy[0] != "jump-1" {
+		t.Fatalf("target blocked_by = %#v, want [jump-1]", app.hosts[1].BlockedBy)
+	}
+
+	treeHosts := app.tree.Hosts()
+	if len(treeHosts) != 2 {
+		t.Fatalf("tree host count = %d, want 2", len(treeHosts))
+	}
+	if treeHosts[0].Transport != model.TransportAuthRequired || treeHosts[1].Transport != model.TransportBlocked {
+		t.Fatalf("tree host transports = [%q %q], want [%q %q]", treeHosts[0].Transport, treeHosts[1].Transport, model.TransportAuthRequired, model.TransportBlocked)
+	}
+}
+
+func TestUpdate_ProbeResultStillUpdatesTreeAndDeadline(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Display.Animation = false
+
+	app := NewApp(cfg, fakeDiscoverer{}, fakeProber{}, nil)
+
+	refreshedAt := time.Now().Add(-2 * time.Second).UTC().Round(0)
+	probedHosts := []model.Host{{
+		Name:   "dev-1",
+		Label:  "dev-1",
+		Status: model.HostStatusOnline,
+		Projects: []model.Project{{
+			Name: "alpha",
+			Sessions: []model.Session{{
+				ID:       "sess-1",
+				Project:  "alpha",
+				Title:    "session one",
+				Activity: model.ActivityActive,
+			}},
+		}},
+	}}
+
+	_, _ = app.Update(tuimodel.ProbeResultMsg{Hosts: probedHosts, RefreshedAt: refreshedAt})
+
+	if len(app.hosts) != 1 || app.hosts[0].Name != "dev-1" {
+		t.Fatalf("app hosts after probe result = %#v, want dev-1", app.hosts)
+	}
+	treeHosts := app.tree.Hosts()
+	if len(treeHosts) != 1 || treeHosts[0].Name != "dev-1" {
+		t.Fatalf("tree hosts after probe result = %#v, want dev-1", treeHosts)
+	}
+
+	wantNext := refreshedAt.Add(cfg.Polling.Interval)
+	if !app.nextRefresh.Equal(wantNext) {
+		t.Fatalf("nextRefresh = %v, want %v", app.nextRefresh, wantNext)
 	}
 }
 
@@ -948,8 +1421,8 @@ func TestReloadFinished_SuccessUpdatesToastAndRefresh(t *testing.T) {
 	if len(batch) != 2 {
 		t.Fatalf("batch command length = %d, want 2 (toast + refresh)", len(batch))
 	}
-	if !batchContainsProbeResult(batch) {
-		t.Fatal("expected reload success command batch to include refreshCmd")
+	if !batchContainsDiscoveryResult(batch) {
+		t.Fatal("expected reload success command batch to include discoverCmd")
 	}
 }
 
@@ -993,9 +1466,28 @@ func TestReloadFinished_ErrorUpdatesToastAndRefresh(t *testing.T) {
 	if len(batch) != 2 {
 		t.Fatalf("batch command length = %d, want 2 (toast + refresh)", len(batch))
 	}
-	if !batchContainsProbeResult(batch) {
-		t.Fatal("expected reload error command batch to include refreshCmd")
+	if !batchContainsDiscoveryResult(batch) {
+		t.Fatal("expected reload error command batch to include discoverCmd")
 	}
+}
+
+func batchContainsDiscoveryResult(cmds tea.BatchMsg) bool {
+	for _, cmd := range cmds {
+		if cmd == nil {
+			continue
+		}
+
+		msg, ok := runCmdWithTimeout(cmd, 100*time.Millisecond)
+		if !ok {
+			continue
+		}
+
+		if _, isDiscovery := msg.(tuimodel.DiscoveryResultMsg); isDiscovery {
+			return true
+		}
+	}
+
+	return false
 }
 
 func batchContainsProbeResult(cmds tea.BatchMsg) bool {
@@ -1037,4 +1529,9 @@ func runCmdWithTimeout(cmd tea.Cmd, timeout time.Duration) (tea.Msg, bool) {
 	case <-time.After(timeout):
 		return nil, false
 	}
+}
+
+func hostPtr(host model.Host) *model.Host {
+	copy := host
+	return &copy
 }

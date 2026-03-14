@@ -13,6 +13,7 @@
   "main": "./out/extension.js",
   "activationEvents": [
     "onView:opencodeSessions",
+    "onView:opencodeRemoteHosts",
     "onView:opencodeChat",
     "onTerminalProfile:opencode.terminalProfile",
     "onCommand:opencode.attachSession",
@@ -20,6 +21,7 @@
     "onCommand:opencode.openChat",
     "onCommand:opencode.openTerminal",
     "onCommand:opencode.refreshSessions",
+    "onCommand:opencode.refreshRemoteHosts",
     "onCommand:opencode.stopSession",
     "onCommand:opencode.restartSession",
     "onCommand:opencode.deleteSession",
@@ -41,6 +43,10 @@
         {
           "id": "opencodeSessions",
           "name": "Sessions"
+        },
+        {
+          "id": "opencodeRemoteHosts",
+          "name": "Remote Hosts"
         },
         {
           "id": "opencodeChat",
@@ -71,6 +77,11 @@
       {
         "command": "opencode.refreshSessions",
         "title": "OpenCode: Refresh Sessions",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "opencode.refreshRemoteHosts",
+        "title": "OpenCode: Refresh Remote Hosts",
         "icon": "$(refresh)"
       },
       {
@@ -113,6 +124,11 @@
           "command": "opencode.refreshSessions",
           "when": "view == opencodeSessions",
           "group": "navigation@2"
+        },
+        {
+          "command": "opencode.refreshRemoteHosts",
+          "when": "view == opencodeRemoteHosts",
+          "group": "navigation@1"
         },
         {
           "command": "opencode.openChat",
@@ -179,6 +195,17 @@
           "type": "string",
           "default": "",
           "description": "Optional bearer token for control plane API requests."
+        },
+        "opencode.remoteSshConfigPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional SSH config path override for remote host discovery (for example ~/.ssh/config)."
+        },
+        "opencode.remoteHostsAutoRefreshSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "description": "Automatic refresh interval for Remote Hosts view in seconds (0 disables auto-refresh)."
         }
       }
     }
@@ -187,16 +214,19 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src/**/*.ts",
-    "test": "npm run compile",
+    "test": "npm run compile && node ./out/test/runTest.js",
     "package": "npx @vscode/vsce package"
   },
   "devDependencies": {
+    "@types/mocha": "^10.0.10",
     "@types/node": "^20.16.5",
     "@types/vscode": "^1.90.0",
     "@typescript-eslint/eslint-plugin": "^8.56.1",
     "@typescript-eslint/parser": "^8.56.1",
+    "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "^2.31.1",
     "eslint": "^10.0.2",
+    "mocha": "^11.7.5",
     "typescript": "^5.6.2"
   }
 }

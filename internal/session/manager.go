@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -281,12 +282,20 @@ func (m *Manager) Get(id string) (*SessionHandle, error) {
 
 	m.mu.RLock()
 	rec, ok := m.sessions[id]
+	m.mu.RUnlock()
 	if !ok {
+		m.syncFromRegistry()
+		m.mu.RLock()
+		rec, ok = m.sessions[id]
+		if !ok {
+			m.mu.RUnlock()
+			return nil, ErrSessionNotFound
+		}
+		handle := cloneSessionHandle(rec.handle)
 		m.mu.RUnlock()
-		return nil, ErrSessionNotFound
+		return &handle, nil
 	}
 	handle := cloneSessionHandle(rec.handle)
-	m.mu.RUnlock()
 
 	return &handle, nil
 }
@@ -295,6 +304,8 @@ func (m *Manager) List(filter SessionListFilter) ([]SessionHandle, error) {
 	if m == nil {
 		return nil, nil
 	}
+
+	m.syncFromRegistry()
 
 	m.mu.RLock()
 	result := make([]SessionHandle, 0, len(m.sessions))
@@ -435,16 +446,67 @@ func (m *Manager) AttachTerminal(ctx context.Context, id string) (TerminalConn, 
 
 	m.mu.RLock()
 	rec, ok := m.sessions[id]
+	m.mu.RUnlock()
 	if !ok {
+		m.syncFromRegistry()
+		m.mu.RLock()
+		rec, ok = m.sessions[id]
+		if !ok {
+			m.mu.RUnlock()
+			return nil, ErrSessionNotFound
+		}
+		handle := cloneSessionHandle(rec.handle)
+		if rec.handle.Status == SessionStatusStopped {
+			m.mu.RUnlock()
+			return nil, ErrSessionStopped
+		}
 		m.mu.RUnlock()
+
+		conn, err := m.terminalDialer(ctx, handle)
+		if err != nil {
+			return nil, err
+		}
+
+		clientID := m.nextClientID()
+		now := m.now()
+
+		var attached int
+		var snapshot SessionHandle
+
+		m.mu.Lock()
+		rec, ok = m.sessions[id]
+		if !ok {
+			m.mu.Unlock()
+			if closeErr := conn.Close(); closeErr != nil {
+				m.logger.Debug("failed to close terminal connection after missing session", "session_id", id, "error", closeErr)
+			}
+			return nil, ErrSessionNotFound
+		}
+		rec.handle.AttachedClients++
+		rec.handle.LastActivity = now
+		attached = rec.handle.AttachedClients
+		snapshot = cloneSessionHandle(rec.handle)
+		m.mu.Unlock()
+
+		m.publishEvent(SessionAttached{At: now, Session: snapshot, AttachedClients: attached, ClientID: clientID})
+
+		wrapped := &managedTerminalConn{
+			TerminalConn: conn,
+			onClose: func() {
+				m.onTerminalDetached(id, clientID)
+			},
+		}
+
+		return wrapped, nil
+	}
+
+	if !ok {
 		return nil, ErrSessionNotFound
 	}
 	if rec.handle.Status == SessionStatusStopped {
-		m.mu.RUnlock()
 		return nil, ErrSessionStopped
 	}
 	handle := cloneSessionHandle(rec.handle)
-	m.mu.RUnlock()
 
 	conn, err := m.terminalDialer(ctx, handle)
 	if err != nil {
@@ -493,28 +555,34 @@ func (m *Manager) Health(ctx context.Context, id string) (HealthStatus, error) {
 	rec, ok := m.sessions[id]
 	if !ok {
 		m.mu.RUnlock()
-		return HealthStatus{}, ErrSessionNotFound
-	}
-	if rec.handle.Status == SessionStatusStopped || rec.process == nil {
-		current := rec.health
-		if current.LastCheck.IsZero() {
-			current.LastCheck = m.now()
+		m.syncFromRegistry()
+		m.mu.RLock()
+		rec, ok = m.sessions[id]
+		if !ok {
+			m.mu.RUnlock()
+			return HealthStatus{}, ErrSessionNotFound
 		}
-		m.mu.RUnlock()
-		return current, nil
 	}
-
 	now := m.now()
-	if !rec.nextProbeAt.IsZero() && now.Before(rec.nextProbeAt) {
-		current := rec.health
+	current := rec.health
+	status := rec.handle.Status
+	port := rec.handle.DaemonPort
+	nextProbeAt := rec.nextProbeAt
+	m.mu.RUnlock()
+
+	if status == SessionStatusStopped || port <= 0 {
 		if current.LastCheck.IsZero() {
 			current.LastCheck = now
 		}
-		m.mu.RUnlock()
 		return current, nil
 	}
-	port := rec.handle.DaemonPort
-	m.mu.RUnlock()
+
+	if !nextProbeAt.IsZero() && now.Before(nextProbeAt) {
+		if current.LastCheck.IsZero() {
+			current.LastCheck = now
+		}
+		return current, nil
+	}
 
 	next := m.healthChecker(ctx, port)
 	if next.LastCheck.IsZero() {
@@ -791,10 +859,12 @@ func (m *Manager) healthLoop(ctx context.Context) {
 }
 
 func (m *Manager) healthCheckSessionIDs() []string {
+	m.syncFromRegistry()
+
 	m.mu.RLock()
 	ids := make([]string, 0, len(m.sessions))
 	for id, rec := range m.sessions {
-		if rec.handle.Status == SessionStatusStopped || rec.process == nil {
+		if rec.handle.Status == SessionStatusStopped || rec.handle.DaemonPort <= 0 {
 			continue
 		}
 		ids = append(ids, id)
@@ -822,6 +892,147 @@ func (m *Manager) stopBackgroundLoop() {
 			m.loopCancel()
 		}
 	})
+}
+
+func (m *Manager) syncFromRegistry() {
+	if m == nil || m.registry == nil {
+		return
+	}
+
+	backends := m.registry.All()
+	if len(backends) == 0 {
+		return
+	}
+
+	now := m.now()
+	discovered := make(map[string]struct{}, len(backends)*4)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, backend := range backends {
+		if backend == nil {
+			continue
+		}
+
+		backendSessions := m.registry.ListSessions(backend.Slug)
+		for _, sessionMeta := range backendSessions {
+			sessionID := strings.TrimSpace(sessionMeta.ID)
+			if sessionID == "" {
+				continue
+			}
+
+			discovered[sessionID] = struct{}{}
+
+			workspacePath := strings.TrimSpace(sessionMeta.Directory)
+			if workspacePath == "" {
+				workspacePath = backend.ProjectPath
+			}
+
+			daemonPort := sessionMeta.DaemonPort
+			if daemonPort <= 0 {
+				daemonPort = backend.Port
+			}
+			if daemonPort <= 0 {
+				continue
+			}
+
+			createdAt := sessionMeta.CreatedAt
+			if createdAt.IsZero() {
+				createdAt = now
+			}
+
+			lastActivity := sessionMeta.LastActivity
+			if lastActivity.IsZero() {
+				lastActivity = createdAt
+			}
+
+			status := sessionStatusFromRegistry(sessionMeta.Status)
+
+			labels := map[string]string{
+				"source":       "registry",
+				"backend_slug": backend.Slug,
+			}
+			if backend.ProjectPath != "" {
+				labels["backend_path"] = backend.ProjectPath
+			}
+
+			rec, ok := m.sessions[sessionID]
+			if ok && rec.process != nil {
+				continue
+			}
+			if ok && !isRegistrySession(rec) {
+				continue
+			}
+
+			health := HealthStatus{State: HealthStateUnknown, LastCheck: now}
+			if ok {
+				health = rec.health
+				if health.LastCheck.IsZero() {
+					health.LastCheck = now
+				}
+			}
+
+			m.sessions[sessionID] = &managedSession{
+				handle: SessionHandle{
+					ID:              sessionID,
+					DaemonPort:      daemonPort,
+					WorkspacePath:   workspacePath,
+					Status:          status,
+					CreatedAt:       createdAt,
+					LastActivity:    lastActivity,
+					AttachedClients: sessionMeta.AttachedClients,
+					Labels:          cloneStringMap(labels),
+				},
+				opts: CreateOpts{
+					WorkspacePath: workspacePath,
+					Labels:        cloneStringMap(labels),
+				},
+				health:       health,
+				healthFails:  0,
+				nextProbeAt:  time.Time{},
+				expectedStop: true,
+				exitCh:       nil,
+			}
+		}
+	}
+
+	for sessionID, rec := range m.sessions {
+		if rec.process != nil {
+			continue
+		}
+		if !isRegistrySession(rec) {
+			continue
+		}
+		if _, ok := discovered[sessionID]; !ok {
+			delete(m.sessions, sessionID)
+		}
+	}
+}
+
+func isRegistrySession(rec *managedSession) bool {
+	if rec == nil {
+		return false
+	}
+	if rec.opts.Labels == nil {
+		return false
+	}
+	return rec.opts.Labels["source"] == "registry"
+}
+
+func sessionStatusFromRegistry(raw string) SessionStatus {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "active", "running", "online", "ready":
+		return SessionStatusActive
+	case "idle", "paused":
+		return SessionStatusIdle
+	case "stopped", "offline", "terminated":
+		return SessionStatusStopped
+	case "error", "failed", "unhealthy":
+		return SessionStatusError
+	default:
+		return SessionStatusUnknown
+	}
 }
 
 func (m *Manager) waitForBackground(ctx context.Context) error {

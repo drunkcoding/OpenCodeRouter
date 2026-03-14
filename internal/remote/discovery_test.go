@@ -57,6 +57,125 @@ Host !ignored
 	}
 }
 
+func TestLoadHostAliases_IncludeGlobAbsolute(t *testing.T) {
+	tmpDir := t.TempDir()
+	mainConfigPath := filepath.Join(tmpDir, "config")
+	includeDir := filepath.Join(tmpDir, "config.d")
+
+	writeSSHConfigFile(t, mainConfigPath, "Host root-host\n  User root\nInclude "+filepath.Join(includeDir, "*.conf")+"\n")
+	writeSSHConfigFile(t, filepath.Join(includeDir, "one.conf"), "Host include-one\n")
+	writeSSHConfigFile(t, filepath.Join(includeDir, "two.conf"), "Host include-two\n")
+
+	svc := NewDiscoveryService(DiscoveryOptions{}, discoveryRunnerMock{}, nil)
+	svc.SetSSHConfigPath(mainConfigPath)
+
+	aliases, err := svc.loadHostAliases()
+	if err != nil {
+		t.Fatalf("load host aliases: %v", err)
+	}
+
+	assertAliasSet(t, aliases, "root-host", "include-one", "include-two")
+}
+
+func TestLoadHostAliases_IncludeRelativePath(t *testing.T) {
+	tmpDir := t.TempDir()
+	mainConfigPath := filepath.Join(tmpDir, "config")
+	relativeIncludePath := filepath.Join("includes", "relative.conf")
+
+	writeSSHConfigFile(t, mainConfigPath, "Host root-host\nInclude "+relativeIncludePath+"\n")
+	writeSSHConfigFile(t, filepath.Join(tmpDir, relativeIncludePath), "Host relative-host\n")
+
+	svc := NewDiscoveryService(DiscoveryOptions{}, discoveryRunnerMock{}, nil)
+	svc.SetSSHConfigPath(mainConfigPath)
+
+	aliases, err := svc.loadHostAliases()
+	if err != nil {
+		t.Fatalf("load host aliases: %v", err)
+	}
+
+	assertAliasSet(t, aliases, "root-host", "relative-host")
+}
+
+func TestLoadHostAliases_IncludeNested(t *testing.T) {
+	tmpDir := t.TempDir()
+	mainConfigPath := filepath.Join(tmpDir, "config")
+	levelOnePath := filepath.Join(tmpDir, "level-one.conf")
+	levelTwoPath := filepath.Join(tmpDir, "level-two.conf")
+
+	writeSSHConfigFile(t, mainConfigPath, "Host root-host\nInclude "+levelOnePath+"\n")
+	writeSSHConfigFile(t, levelOnePath, "Host level-one-host\nInclude "+levelTwoPath+"\n")
+	writeSSHConfigFile(t, levelTwoPath, "Host level-two-host\n")
+
+	svc := NewDiscoveryService(DiscoveryOptions{}, discoveryRunnerMock{}, nil)
+	svc.SetSSHConfigPath(mainConfigPath)
+
+	aliases, err := svc.loadHostAliases()
+	if err != nil {
+		t.Fatalf("load host aliases: %v", err)
+	}
+
+	assertAliasSet(t, aliases, "root-host", "level-one-host", "level-two-host")
+}
+
+func TestLoadHostAliases_IncludeCycleSafe(t *testing.T) {
+	tmpDir := t.TempDir()
+	mainConfigPath := filepath.Join(tmpDir, "a.conf")
+	otherConfigPath := filepath.Join(tmpDir, "b.conf")
+
+	writeSSHConfigFile(t, mainConfigPath, "Host cycle-a\nInclude "+otherConfigPath+"\n")
+	writeSSHConfigFile(t, otherConfigPath, "Host cycle-b\nInclude "+mainConfigPath+"\n")
+
+	svc := NewDiscoveryService(DiscoveryOptions{}, discoveryRunnerMock{}, nil)
+	svc.SetSSHConfigPath(mainConfigPath)
+
+	aliases, err := svc.loadHostAliases()
+	if err != nil {
+		t.Fatalf("load host aliases: %v", err)
+	}
+
+	assertAliasSet(t, aliases, "cycle-a", "cycle-b")
+}
+
+func TestLoadHostAliases_IncludeNonexistentGraceful(t *testing.T) {
+	tmpDir := t.TempDir()
+	mainConfigPath := filepath.Join(tmpDir, "config")
+	existingIncludePath := filepath.Join(tmpDir, "existing.conf")
+
+	writeSSHConfigFile(t, mainConfigPath, "Host root-host\nInclude "+filepath.Join(tmpDir, "missing", "*.conf")+"\nInclude "+existingIncludePath+"\n")
+	writeSSHConfigFile(t, existingIncludePath, "Host existing-host\n")
+
+	svc := NewDiscoveryService(DiscoveryOptions{}, discoveryRunnerMock{}, nil)
+	svc.SetSSHConfigPath(mainConfigPath)
+
+	aliases, err := svc.loadHostAliases()
+	if err != nil {
+		t.Fatalf("load host aliases: %v", err)
+	}
+
+	assertAliasSet(t, aliases, "root-host", "existing-host")
+}
+
+func TestLoadHostAliases_IncludeExpandsHomeDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home")
+	t.Setenv("HOME", homeDir)
+
+	mainConfigPath := filepath.Join(tmpDir, "config")
+	homeIncludeDir := filepath.Join(homeDir, ".ssh", "config.d")
+	writeSSHConfigFile(t, filepath.Join(homeIncludeDir, "home.conf"), "Host home-host\n")
+	writeSSHConfigFile(t, mainConfigPath, "Host root-host\nInclude ~/.ssh/config.d/*.conf\n")
+
+	svc := NewDiscoveryService(DiscoveryOptions{}, discoveryRunnerMock{}, nil)
+	svc.SetSSHConfigPath(mainConfigPath)
+
+	aliases, err := svc.loadHostAliases()
+	if err != nil {
+		t.Fatalf("load host aliases: %v", err)
+	}
+
+	assertAliasSet(t, aliases, "root-host", "home-host")
+}
+
 func TestDiscover_WithFilteringAndOverrides(t *testing.T) {
 	tmpDir := t.TempDir()
 	sshPath := filepath.Join(tmpDir, "config")
@@ -117,5 +236,35 @@ func TestNewDiscoveryService_NilLoggerDefaultsToDiscard(t *testing.T) {
 	}
 	if svc.logger == nil {
 		t.Fatal("expected discovery service logger to default to non-nil discard logger")
+	}
+}
+
+func writeSSHConfigFile(t *testing.T, filePath, body string) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatalf("create config directory %q: %v", filepath.Dir(filePath), err)
+	}
+	if err := os.WriteFile(filePath, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config file %q: %v", filePath, err)
+	}
+}
+
+func assertAliasSet(t *testing.T, got []string, want ...string) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Fatalf("expected %d aliases, got %d (%v)", len(want), len(got), got)
+	}
+
+	wantSet := make(map[string]struct{}, len(want))
+	for _, alias := range want {
+		wantSet[alias] = struct{}{}
+	}
+
+	for _, alias := range got {
+		if _, ok := wantSet[alias]; !ok {
+			t.Fatalf("unexpected alias %q in %v", alias, got)
+		}
 	}
 }

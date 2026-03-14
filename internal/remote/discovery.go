@@ -153,19 +153,163 @@ func (s *DiscoveryService) Discover(ctx context.Context) ([]model.Host, error) {
 func (s *DiscoveryService) loadHostAliases() ([]string, error) {
 	s.logger.Debug("reading ssh config for host aliases", "path", s.sshConfigPath)
 
-	b, err := os.ReadFile(s.sshConfigPath)
+	configPath, err := expandSSHPath(s.sshConfigPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			s.logger.Debug("ssh config file not found", "path", s.sshConfigPath, "alias_count", 0)
-			return nil, nil
-		}
-		s.logger.Error("failed to read ssh config", "path", s.sshConfigPath, "error", SanitizeLogError(err))
-		return nil, fmt.Errorf("read ssh config %q: %w", s.sshConfigPath, err)
+		s.logger.Error("failed to expand ssh config path", "path", s.sshConfigPath, "error", SanitizeLogError(err))
+		return nil, fmt.Errorf("expand ssh config path %q: %w", s.sshConfigPath, err)
 	}
 
-	aliases := parseSSHConfigHostsWithLogger(string(b), s.logger)
-	s.logger.Debug("loaded host aliases from ssh config", "path", s.sshConfigPath, "alias_count", len(aliases))
+	b, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			s.logger.Debug("ssh config file not found", "path", configPath, "alias_count", 0)
+			return nil, nil
+		}
+		s.logger.Error("failed to read ssh config", "path", configPath, "error", SanitizeLogError(err))
+		return nil, fmt.Errorf("read ssh config %q: %w", configPath, err)
+	}
+
+	expandedConfig, err := expandSSHConfigIncludes(configPath, b, nil)
+	if err != nil {
+		s.logger.Error("failed to expand ssh config includes", "path", configPath, "error", SanitizeLogError(err))
+		return nil, fmt.Errorf("expand includes for ssh config %q: %w", configPath, err)
+	}
+
+	aliases := parseSSHConfigHostsWithLogger(string(expandedConfig), s.logger)
+	s.logger.Debug("loaded host aliases from ssh config", "path", configPath, "alias_count", len(aliases))
 	return aliases, nil
+}
+
+func expandSSHConfigIncludes(configPath string, content []byte, visited map[string]struct{}) ([]byte, error) {
+	if visited == nil {
+		visited = make(map[string]struct{})
+	}
+
+	absPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve absolute path %q: %w", configPath, err)
+	}
+	canonicalPath := filepath.Clean(absPath)
+	if evaluatedPath, evalErr := filepath.EvalSymlinks(canonicalPath); evalErr == nil {
+		canonicalPath = evaluatedPath
+	}
+
+	if _, seen := visited[canonicalPath]; seen {
+		return nil, nil
+	}
+	visited[canonicalPath] = struct{}{}
+
+	parentDir := filepath.Dir(canonicalPath)
+	var out strings.Builder
+
+	scanner := bufio.NewScanner(strings.NewReader(string(content)))
+	for scanner.Scan() {
+		rawLine := scanner.Text()
+		line := strings.TrimSpace(rawLine)
+
+		includePatterns := parseSSHIncludePatterns(line)
+		if len(includePatterns) == 0 {
+			out.WriteString(rawLine)
+			out.WriteByte('\n')
+			continue
+		}
+
+		for _, includePattern := range includePatterns {
+			resolvedPattern, resolveErr := resolveSSHIncludePattern(parentDir, includePattern)
+			if resolveErr != nil {
+				return nil, fmt.Errorf("resolve include pattern %q in %q: %w", includePattern, canonicalPath, resolveErr)
+			}
+
+			matches, globErr := filepath.Glob(resolvedPattern)
+			if globErr != nil {
+				return nil, fmt.Errorf("expand include pattern %q in %q: %w", includePattern, canonicalPath, globErr)
+			}
+
+			for _, includePath := range matches {
+				includeBytes, readErr := os.ReadFile(includePath)
+				if readErr != nil {
+					if os.IsNotExist(readErr) {
+						continue
+					}
+					return nil, fmt.Errorf("read included ssh config %q: %w", includePath, readErr)
+				}
+
+				expandedInclude, includeErr := expandSSHConfigIncludes(includePath, includeBytes, visited)
+				if includeErr != nil {
+					return nil, includeErr
+				}
+				if len(expandedInclude) == 0 {
+					continue
+				}
+
+				out.Write(expandedInclude)
+				if expandedInclude[len(expandedInclude)-1] != '\n' {
+					out.WriteByte('\n')
+				}
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan ssh config %q: %w", canonicalPath, err)
+	}
+
+	return []byte(out.String()), nil
+}
+
+func parseSSHIncludePatterns(line string) []string {
+	fields := strings.Fields(line)
+	if len(fields) < 2 || !strings.EqualFold(fields[0], "include") {
+		return nil
+	}
+
+	patterns := make([]string, 0, len(fields)-1)
+	for _, field := range fields[1:] {
+		if strings.HasPrefix(field, "#") {
+			break
+		}
+
+		pattern := strings.Trim(field, "\"'")
+		if pattern == "" {
+			continue
+		}
+
+		patterns = append(patterns, pattern)
+	}
+
+	return patterns
+}
+
+func resolveSSHIncludePattern(parentDir, includePattern string) (string, error) {
+	resolvedPattern, err := expandSSHPath(includePattern)
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(resolvedPattern) {
+		resolvedPattern = filepath.Join(parentDir, resolvedPattern)
+	}
+
+	return filepath.Clean(resolvedPattern), nil
+}
+
+func expandSSHPath(path string) (string, error) {
+	if path == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return home, nil
+	}
+
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, path[2:]), nil
+	}
+
+	return path, nil
 }
 
 func (s *DiscoveryService) resolveHost(ctx context.Context, alias string) (model.Host, error) {

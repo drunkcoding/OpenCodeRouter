@@ -145,6 +145,19 @@ func TestNewRouterMountsEventsRoute(t *testing.T) {
 	_ = resp.Body.Close()
 }
 
+func TestNewRouterMountsRemoteHostsRoute(t *testing.T) {
+	h := NewRouter(RouterConfig{
+		ScrollbackCache: newRouterTestScrollbackCache(),
+		Fallback:        http.NotFoundHandler(),
+	})
+
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	resp := doJSONRequest(t, srv.Client(), http.MethodPost, srv.URL+"/api/remote/hosts", nil)
+	assertErrorShape(t, resp, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED")
+}
+
 type routerTestScrollbackCache struct{}
 
 func newRouterTestScrollbackCache() *routerTestScrollbackCache { return &routerTestScrollbackCache{} }

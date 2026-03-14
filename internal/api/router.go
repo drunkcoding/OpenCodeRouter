@@ -1,10 +1,13 @@
 package api
 
 import (
+	"log/slog"
 	"net/http"
+	"time"
 
 	"opencoderouter/internal/auth"
 	"opencoderouter/internal/cache"
+	"opencoderouter/internal/remote"
 	"opencoderouter/internal/session"
 	"opencoderouter/internal/terminal"
 )
@@ -15,6 +18,11 @@ type RouterConfig struct {
 	BackendEventSubscribe BackendEventSubscribeFunc
 	AuthConfig            auth.Config
 	ScrollbackCache       cache.ScrollbackCache
+	RemoteDiscovery       remote.DiscoveryOptions
+	RemoteProbe           remote.ProbeOptions
+	RemoteCacheTTL        time.Duration
+	RemoteRunner          remote.Runner
+	RemoteLogger          *slog.Logger
 	Fallback              http.Handler
 }
 
@@ -24,6 +32,13 @@ func NewRouter(cfg RouterConfig) http.Handler {
 	NewEventsHandler(EventsHandlerConfig{
 		SessionEventBus:  cfg.SessionEventBus,
 		BackendSubscribe: cfg.BackendEventSubscribe,
+	}).Register(mux)
+	NewRemoteHostsHandler(RemoteHostsHandlerConfig{
+		DiscoveryOptions: cfg.RemoteDiscovery,
+		ProbeOptions:     cfg.RemoteProbe,
+		CacheTTL:         cfg.RemoteCacheTTL,
+		Runner:           cfg.RemoteRunner,
+		Logger:           cfg.RemoteLogger,
 	}).Register(mux)
 
 	// Wire up the terminal handler

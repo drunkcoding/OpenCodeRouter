@@ -4,6 +4,9 @@ build/
 dist/
 eggs/
 .sisyphus/
+node_modules/
+out/
+vscode-extension/.vscode-test/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -160,6 +160,8 @@ func main() {
 		SessionEventBus: eventBus,
 		AuthConfig:      auth.LoadFromEnv(),
 		ScrollbackCache: scrollbackCache,
+		RemoteLogger:    logger.With("component", "remote-api"),
+		RemoteCacheTTL:  60 * time.Second,
 		Fallback:        rt,
 	})
 

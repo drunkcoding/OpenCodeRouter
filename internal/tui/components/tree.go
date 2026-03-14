@@ -191,7 +191,7 @@ func (t *SessionTreeView) rebuild() {
 			if !projectMatchesQuery(host, project, query) {
 				continue
 			}
-			projectCollapsed := t.isProjectCollapsed(host.Name, project.Name)
+			projectCollapsed := t.isProjectCollapsed(host.Name, project)
 			t.rows = append(t.rows, treeRow{kind: treeNodeProject, hostIdx: hi, projectIdx: pi, sessionIdx: -1, projCollapsed: projectCollapsed})
 			if projectCollapsed {
 				continue
@@ -225,43 +225,13 @@ func (t SessionTreeView) renderRow(row treeRow, selected bool) string {
 		if t.isHostCollapsed(h.Name) {
 			glyph = "▸"
 		}
-		status := string(h.Status)
-		if status == "" {
-			status = string(model.HostStatusUnknown)
-		}
 
-		// Build proxy badge suffix
-		var suffix string
-		if len(h.Dependents) > 0 {
-			suffix += fmt.Sprintf(" [jump for %d]", len(h.Dependents))
-		}
-		if h.Transport == model.TransportBlocked {
-			status = "blocked"
-			if len(h.BlockedBy) > 0 {
-				suffix += fmt.Sprintf(" (via %s)", strings.Join(h.BlockedBy, " → "))
-			}
-		} else if h.ProxyKind == model.ProxyKindJump && h.ProxyJumpRaw != "" {
-			var hops []string
-			for _, hop := range h.JumpChain {
-				if hop.AliasRef != "" {
-					hops = append(hops, hop.AliasRef)
-				} else {
-					hops = append(hops, hop.Host)
-				}
-			}
-			if len(hops) > 0 {
-				suffix += fmt.Sprintf(" via %s", strings.Join(hops, " → "))
-			}
-		} else if h.ProxyKind == model.ProxyKindCommand {
-			suffix += " via ProxyCommand"
-		}
-
-		line = fmt.Sprintf("%s %s [%s]%s", glyph, h.Label, status, suffix)
+		line = fmt.Sprintf("%s %s", glyph, formatHostLabel(h))
 		line = t.theme.TreeHost.Render(line)
 	case treeNodeProject:
 		p := h.Projects[row.projectIdx]
 		glyph := "▾"
-		if t.isProjectCollapsed(h.Name, p.Name) {
+		if t.isProjectCollapsed(h.Name, p) {
 			glyph = "▸"
 		}
 		line = fmt.Sprintf("  %s %s", glyph, p.Name)
@@ -300,7 +270,7 @@ func (t *SessionTreeView) toggleAtCursor() {
 		h := t.hosts[row.hostIdx]
 		p := h.Projects[row.projectIdx]
 		projectKey := makeProjectKey(h.Name, p.Name)
-		t.collapsedProjects[projectKey] = !t.isProjectCollapsed(h.Name, p.Name)
+		t.collapsedProjects[projectKey] = !t.isProjectCollapsed(h.Name, p)
 	}
 	t.rebuild()
 }
@@ -371,11 +341,11 @@ func (t *SessionTreeView) isHostCollapsed(host string) bool {
 	return collapsed
 }
 
-func (t *SessionTreeView) isProjectCollapsed(host, project string) bool {
-	projectKey := makeProjectKey(host, project)
+func (t *SessionTreeView) isProjectCollapsed(host string, project model.Project) bool {
+	projectKey := makeProjectKey(host, project.Name)
 	collapsed, ok := t.collapsedProjects[projectKey]
 	if !ok {
-		return true
+		return len(project.Sessions) == 0
 	}
 	return collapsed
 }
@@ -424,3 +394,59 @@ func treeMaxInt(a, b int) int {
 	}
 	return b
 }
+
+func formatHostLabel(h model.Host) string {
+	status := string(h.Status)
+	if status == "" {
+		status = string(model.HostStatusUnknown)
+	}
+
+	// Build proxy badge suffix
+	var suffix string
+	if len(h.Dependents) > 0 {
+		suffix += fmt.Sprintf(" [jump for %d]", len(h.Dependents))
+	}
+	if h.Transport == model.TransportBlocked {
+		status = "blocked"
+		if len(h.BlockedBy) > 0 {
+			suffix += fmt.Sprintf(" (via %s)", strings.Join(h.BlockedBy, " → "))
+		}
+	} else if h.ProxyKind == model.ProxyKindJump && h.ProxyJumpRaw != "" {
+		var hops []string
+		for _, hop := range h.JumpChain {
+			if hop.AliasRef != "" {
+				hops = append(hops, hop.AliasRef)
+			} else {
+				hops = append(hops, hop.Host)
+			}
+		}
+		if len(hops) > 0 {
+			suffix += fmt.Sprintf(" via %s", strings.Join(hops, " → "))
+		}
+	} else if h.ProxyKind == model.ProxyKindCommand {
+		suffix += " via ProxyCommand"
+	}
+
+	var countIndicator string
+	if h.Status == model.HostStatusOffline || h.Status == model.HostStatusError {
+		countIndicator = " (offline)"
+	} else {
+		sessionCount := 0
+		for _, p := range h.Projects {
+			sessionCount += len(p.Sessions)
+		}
+
+		if sessionCount > 0 {
+			if sessionCount == 1 {
+				countIndicator = " (1 session)"
+			} else {
+				countIndicator = fmt.Sprintf(" (%d sessions)", sessionCount)
+			}
+		} else {
+			countIndicator = " (no sessions)"
+		}
+	}
+
+	return fmt.Sprintf("%s [%s]%s%s", h.Label, status, suffix, countIndicator)
+}
+
