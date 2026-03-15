@@ -70,6 +70,12 @@ function processDiffs(text) {
     btnCreate: document.getElementById('btn-create-session'),
     modal: document.getElementById('modal-overlay'),
     btnCloseModal: document.getElementById('btn-close-modal'),
+    authModalOverlay: document.getElementById('auth-modal-overlay'),
+    btnCloseAuthModal: document.getElementById('btn-close-auth-modal'),
+    authForm: document.getElementById('auth-form'),
+    inputPassword: document.getElementById('input-password'),
+    authHostLabel: document.getElementById('auth-host-label'),
+    authAgentStatus: document.getElementById('auth-agent-status'),
     formCreate: document.getElementById('create-session-form'),
     inputWorkspace: document.getElementById('input-workspace'),
     inputLabel: document.getElementById('input-label'), // repurposed to label
@@ -84,7 +90,15 @@ function processDiffs(text) {
     chatInput: document.getElementById('chat-input'),
     chatContainer: document.getElementById('chat-container'),
     splitResizer: document.getElementById('split-resizer'),
-    btnSendChat: document.getElementById('btn-send-chat')
+    btnSendChat: document.getElementById('btn-send-chat'),
+    tabLocal: document.getElementById('tab-local'),
+    tabRemote: document.getElementById('tab-remote'),
+    viewRemote: document.getElementById('view-remote'),
+    remoteHostsContainer: document.getElementById('remote-hosts-container'),
+    remoteEmptyState: document.getElementById('remote-empty-state'),
+    remoteErrorState: document.getElementById('remote-error-state'),
+    btnRefreshRemote: document.getElementById('btn-refresh-remote'),
+    remoteSearchInput: document.getElementById('remote-search-input')
   };
 
   function normalizeSSEtoView(sseSession) {
@@ -541,7 +555,455 @@ function processDiffs(text) {
   // Bootstrap
   loadInitial();
 
-  // Chat Logic
+  const remoteState = {
+    hosts: [],
+    filter: '',
+    isLoading: false,
+    error: null,
+    tunnels: [],
+    expandedProjects: new Set()
+  };
+
+  let remoteRefreshTimer = null;
+
+  function startRemoteRefreshTimer() {
+    stopRemoteRefreshTimer();
+    remoteRefreshTimer = setInterval(() => {
+      fetchRemoteHosts(true);
+    }, 30000);
+  }
+
+  function stopRemoteRefreshTimer() {
+    if (remoteRefreshTimer) {
+      clearInterval(remoteRefreshTimer);
+      remoteRefreshTimer = null;
+    }
+  }
+
+  window.switchTab = function(tabName) {
+    if (tabName === 'local') {
+      if(DOM.tabLocal) DOM.tabLocal.classList.add('tab-active');
+      if(DOM.tabRemote) DOM.tabRemote.classList.remove('tab-active');
+      if(DOM.viewSessions) DOM.viewSessions.style.display = 'block';
+      if(DOM.viewRemote) DOM.viewRemote.style.display = 'none';
+      if(DOM.viewTerminal) DOM.viewTerminal.style.display = 'none';
+      stopRemoteRefreshTimer();
+    } else if (tabName === 'remote') {
+      if(DOM.tabRemote) DOM.tabRemote.classList.add('tab-active');
+      if(DOM.tabLocal) DOM.tabLocal.classList.remove('tab-active');
+      if(DOM.viewRemote) DOM.viewRemote.style.display = 'block';
+      if(DOM.viewSessions) DOM.viewSessions.style.display = 'none';
+      if(DOM.viewTerminal) DOM.viewTerminal.style.display = 'none';
+      
+      if (remoteState.hosts.length === 0 && !remoteState.isLoading) {
+        fetchRemoteHosts();
+      }
+      startRemoteRefreshTimer();
+    }
+  };
+
+  if(DOM.tabLocal) DOM.tabLocal.addEventListener('click', () => switchTab('local'));
+  if(DOM.tabRemote) DOM.tabRemote.addEventListener('click', () => switchTab('remote'));
+
+  async function fetchRemoteHosts(isSilentRefresh = false) {
+    if (remoteState.isLoading) return;
+    remoteState.isLoading = true;
+    
+    if (!isSilentRefresh && DOM.remoteEmptyState) {
+      DOM.remoteEmptyState.style.display = 'block';
+      if(DOM.remoteHostsContainer) DOM.remoteHostsContainer.innerHTML = '';
+      if(DOM.remoteErrorState) DOM.remoteErrorState.style.display = 'none';
+    }
+
+    try {
+      const qs = isSilentRefresh ? '?refresh=true' : '';
+      const [res, tunnelsRes] = await Promise.all([
+        fetch('/api/remote/hosts' + qs),
+        fetch('/api/remote/tunnels')
+      ]);
+      
+      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+      const data = await res.json();
+      // The API returns { hosts: [...], warnings: [...] } so we handle both cases
+      remoteState.hosts = data.hosts || data || [];
+      remoteState.warnings = data.warnings || [];
+      remoteState.error = null;
+      
+      if (tunnelsRes.ok) {
+        remoteState.tunnels = await tunnelsRes.json();
+        remoteState.serves = {};
+        await Promise.all(remoteState.tunnels.filter(t => t.state === 'connected').map(async (t) => {
+          try {
+             const sr = await fetch(`/api/remote/serve/${t.hostAlias}`);
+             if (sr.ok) {
+                remoteState.serves[t.hostAlias] = await sr.json();
+             }
+          } catch(e) {}
+        }));
+      } else {
+        remoteState.tunnels = [];
+        remoteState.serves = {};
+      }
+    } catch (e) {
+      console.error('Failed to fetch remote hosts', e);
+      remoteState.error = e.message;
+      if (!isSilentRefresh && DOM.remoteErrorState) {
+        DOM.remoteErrorState.style.display = 'block';
+        if(DOM.remoteEmptyState) DOM.remoteEmptyState.style.display = 'none';
+      }
+    } finally {
+      remoteState.isLoading = false;
+      renderRemoteHosts();
+    }
+  }
+
+  window.toggleProjectExpanded = function(projectId) {
+    if (remoteState.expandedProjects.has(projectId)) {
+      remoteState.expandedProjects.delete(projectId);
+    } else {
+      remoteState.expandedProjects.add(projectId);
+    }
+    const el = document.getElementById(projectId + '-sessions');
+    const toggleEl = document.getElementById(projectId + '-toggle');
+    if (el) {
+      if (remoteState.expandedProjects.has(projectId)) {
+        el.style.display = 'block';
+        if (toggleEl) toggleEl.textContent = '[-]';
+      } else {
+        el.style.display = 'none';
+        if (toggleEl) toggleEl.textContent = '[+]';
+      }
+    }
+  };
+
+
+window.connectHost = async function(hostName) {
+  try {
+    const res = await fetch('/api/remote/tunnel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: hostName })
+    });
+    
+    if (res.status === 401 || res.status === 403 || (!res.ok && (await res.clone().json().catch(()=>({}))).code === 'AUTH_REQUIRED')) {
+      showAuthModal(hostName);
+      return;
+    }
+    if (!res.ok) {
+      const err = await res.json().catch(()=>({message: 'Unknown error'}));
+      if (err.code === 'AUTH_REQUIRED') {
+        showAuthModal(hostName);
+        return;
+      }
+      throw new Error(err.message || 'Failed to connect');
+    }
+    
+    startFastRefresh();
+  } catch (e) {
+    alert('Connect failed: ' + e.message);
+  }
+};
+
+window.disconnectHost = async function(tunnelId) {
+  try {
+    const res = await fetch(`/api/remote/tunnel/${tunnelId}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('Failed to disconnect');
+    fetchRemoteHosts(true);
+  } catch (e) {
+    alert('Disconnect failed: ' + e.message);
+  }
+};
+
+window.startServe = async function(hostName, projectDir) {
+  try {
+    const res = await fetch('/api/remote/serve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: hostName, projectDir: projectDir })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(()=>({message: 'Unknown error'}));
+      throw new Error(err.message || 'Failed to start serve');
+    }
+    fetchRemoteHosts(true);
+  } catch (e) {
+    alert('Failed to start serve: ' + e.message);
+  }
+};
+
+window.openOpencode = function(hostName, projectDir) {
+  const encProject = encodeURIComponent(projectDir);
+  window.open(`/remote/${hostName}/${encProject}/`, '_blank');
+};
+
+let fastRefreshTimer = null;
+function startFastRefresh() {
+  if (fastRefreshTimer) clearInterval(fastRefreshTimer);
+  fetchRemoteHosts(true);
+  fastRefreshTimer = setInterval(() => {
+    const isConnecting = (remoteState.tunnels || []).some(t => t.state === 'connecting');
+    if (!isConnecting) {
+      clearInterval(fastRefreshTimer);
+      fastRefreshTimer = null;
+    }
+    fetchRemoteHosts(true);
+  }, 5000);
+}
+
+let currentAuthHost = '';
+
+window.showAuthModal = async function(hostName) {
+  currentAuthHost = hostName;
+  if(DOM.authHostLabel) DOM.authHostLabel.innerText = `> PASSWORD FOR ${hostName}`;
+  if(DOM.inputPassword) DOM.inputPassword.value = '';
+  if(DOM.authModalOverlay) DOM.authModalOverlay.style.display = 'flex';
+  if(DOM.inputPassword) DOM.inputPassword.focus();
+  
+  if(DOM.authAgentStatus) {
+    DOM.authAgentStatus.innerText = 'Checking SSH agent...';
+    try {
+      const res = await fetch('/api/remote/auth/agent');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.available) {
+          DOM.authAgentStatus.innerText = `SSH Agent active (Socket: ${data.socketPath})`;
+        } else {
+          DOM.authAgentStatus.innerText = 'SSH Agent not available or no identities.';
+        }
+      } else {
+        DOM.authAgentStatus.innerText = 'SSH Agent status unknown.';
+      }
+    } catch(e) {
+      DOM.authAgentStatus.innerText = 'Error checking SSH agent.';
+    }
+  }
+};
+
+if(DOM.btnCloseAuthModal) {
+  DOM.btnCloseAuthModal.addEventListener('click', () => {
+    if(DOM.authModalOverlay) DOM.authModalOverlay.style.display = 'none';
+  });
+}
+
+if(DOM.authForm) {
+  DOM.authForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const pwd = DOM.inputPassword.value;
+    const btn = document.getElementById('btn-auth-submit');
+    if(btn) btn.disabled = true;
+    
+    try {
+      const res = await fetch('/api/remote/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host: currentAuthHost, password: pwd })
+      });
+      
+      if (!res.ok) {
+        const err = await res.json().catch(()=>({message: 'Auth failed'}));
+        throw new Error(err.message || 'Auth failed');
+      }
+      
+      if(DOM.authModalOverlay) DOM.authModalOverlay.style.display = 'none';
+      
+      window.connectHost(currentAuthHost);
+      
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      if(btn) btn.disabled = false;
+      if(DOM.inputPassword) DOM.inputPassword.value = '';
+    }
+  });
+}
+
+  function renderRemoteHosts() {
+    if (!DOM.remoteHostsContainer) return;
+    
+    const filterText = remoteState.filter.toLowerCase();
+    
+    const visibleHosts = remoteState.hosts.filter(h => {
+      if (!filterText) return true;
+      const searchable = `${h.name} ${h.address} ${h.user}`.toLowerCase();
+      if (searchable.includes(filterText)) return true;
+      
+      if (h.projects) {
+        for (const p of h.projects) {
+          if (p.name.toLowerCase().includes(filterText)) return true;
+          if (p.path.toLowerCase().includes(filterText)) return true;
+        }
+      }
+      return false;
+    });
+
+    if (remoteState.hosts.length === 0 && !remoteState.error) {
+      DOM.remoteHostsContainer.innerHTML = '<div class="empty-state">> NO_REMOTE_HOSTS_FOUND</div>';
+      if(DOM.remoteEmptyState) DOM.remoteEmptyState.style.display = 'none';
+      return;
+    }
+
+    if (visibleHosts.length === 0 && remoteState.hosts.length > 0 && !remoteState.error) {
+      DOM.remoteHostsContainer.innerHTML = '<div class="empty-state">> NO_MATCHING_HOSTS</div>';
+      if(DOM.remoteEmptyState) DOM.remoteEmptyState.style.display = 'none';
+      return;
+    }
+
+    if (remoteState.hosts.length > 0 && !remoteState.error) {
+      if(DOM.remoteEmptyState) DOM.remoteEmptyState.style.display = 'none';
+      if(DOM.remoteErrorState) DOM.remoteErrorState.style.display = 'none';
+      
+      let html = '';
+      visibleHosts.forEach((host, hIdx) => {
+        let statusClass = host.status === 'online' ? 'active' : 'error';
+        let statusText = host.status.toUpperCase();
+        if (host.status === 'auth_required') {
+          statusClass = 'warning';
+          statusText = 'AUTH_REQ';
+        }
+        
+        const tunnel = (remoteState.tunnels || []).find(t => t.hostAlias === host.name || t.remoteHost === host.address || t.remoteHost === host.name);
+
+        let projectsHtml = '';
+        if (host.projects && host.projects.length > 0) {
+          projectsHtml = `
+            <div class="host-projects">
+              ${host.projects.map((p, idx) => {
+                const sessionCount = p.sessions ? p.sessions.length : 0;
+                const projectId = ('project-' + host.name + '-' + idx).replace(/\W/g, '-');
+                const isExpanded = remoteState.expandedProjects.has(projectId);
+                
+                let sessionsHtml = '';
+                if (sessionCount > 0) {
+                  sessionsHtml = `
+                    <div class="project-sessions-list" id="${projectId}-sessions" style="display: ${isExpanded ? 'block' : 'none'}; padding-top: 0.5rem; margin-top: 0.5rem; border-top: 1px dashed rgba(51, 51, 51, 0.5);">
+                      ${p.sessions.map(s => {
+                        const sStatus = (s.status || 'unknown').toLowerCase();
+                        let sStatusClass = 'error';
+                        if (sStatus === 'active') sStatusClass = 'active';
+                        else if (sStatus === 'idle') sStatusClass = 'idle';
+                        else if (sStatus === 'stopped') sStatusClass = 'stopped';
+                        
+                        return `
+                          <div class="project-session-item" style="display: flex; justify-content: space-between; align-items: center; padding: 0.25rem 0; font-size: 0.8rem;">
+                            <div style="display: flex; flex-direction: column; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%;">
+                              <span style="color: var(--fg-base);">${s.id}</span>
+                              ${s.directory ? `<span style="color: var(--fg-muted); font-size: 0.7rem;" title="${s.directory}">${s.directory}</span>` : ''}
+                            </div>
+                            <span class="status-badge ${sStatusClass}" style="transform: scale(0.8); transform-origin: right;">${sStatus.toUpperCase()}</span>
+                          </div>
+                        `;
+                      }).join('')}
+                    </div>
+                  `;
+                }
+                
+                return `
+                  <div class="host-project-container">
+                    <div class="host-project-item" style="cursor: ${sessionCount > 0 ? 'pointer' : 'default'};" ${sessionCount > 0 ? `onclick="toggleProjectExpanded('${projectId}')"` : ''}>
+                      <span class="project-name">${p.name}</span>
+                      <span class="project-sessions" style="display: flex; align-items: center; gap: 0.5rem;">
+                        ${sessionCount} session(s)
+                        ${tunnel && tunnel.state === 'connected' ? `<button class="cyber-button secondary" style="font-size: 0.6rem; padding: 0.1rem 0.3rem;" onclick="event.stopPropagation(); window.openOpencode('${host.name}', '${p.path}')">OPEN IDE</button>` : ''}
+                        ${sessionCount > 0 ? `<span id="${projectId}-toggle" style="font-size: 0.7rem; color: var(--accent-secondary);">${isExpanded ? '[-]' : '[+]'}</span>` : ''}
+                      </span>
+                    </div>
+                    ${sessionsHtml}
+                  </div>
+                `;
+              }).join('')}
+            </div>
+          `;
+        }
+
+        let actionBtn = '';
+        let openCodeBtn = '';
+        let tunnelStatusBadge = '';
+        
+        const serveStatus = (remoteState.serves || {})[host.name] || (remoteState.serves || {})[host.address];
+        
+        if (tunnel) {
+            if (tunnel.state === 'connected') {
+                actionBtn = `<button class="cyber-button error" style="margin-top: 0.5rem;" onclick="window.disconnectHost('${tunnel.id}')">[DISCONNECT]</button>`;
+                tunnelStatusBadge = `<span class="status-badge active" style="margin-left: 0.5rem;">TUN_CONN</span>`;
+                if (serveStatus && serveStatus.state === 'running') {
+                    openCodeBtn = `<span class="status-badge active" style="margin-top: 0.5rem; margin-left: 0.5rem;">SERVE_RUNNING</span>`;
+                } else if (serveStatus && serveStatus.state === 'starting') {
+                    openCodeBtn = `<span class="status-badge idle" style="margin-top: 0.5rem; margin-left: 0.5rem;">SERVE_STARTING</span>`;
+                } else {
+                    openCodeBtn = `<button class="cyber-button primary" style="margin-top: 0.5rem; margin-left: 0.5rem;" onclick="window.startServe('${host.name}', '~')">[START_SERVE]</button>`;
+                }
+            } else if (tunnel.state === 'connecting') {
+                actionBtn = `<button class="cyber-button secondary" disabled style="margin-top: 0.5rem;">[CONNECTING...]</button>
+                             <button class="cyber-button error" style="margin-top: 0.5rem; margin-left: 0.5rem;" onclick="window.disconnectHost('${tunnel.id}')">[CANCEL]</button>`;
+                tunnelStatusBadge = `<span class="status-badge idle" style="margin-left: 0.5rem;">TUN_WAIT</span>`;
+            } else {
+                actionBtn = `<button class="cyber-button secondary" style="margin-top: 0.5rem;" onclick="window.connectHost('${host.name}')">[CONNECT]</button>`;
+                if (tunnel.state === 'error') {
+                    tunnelStatusBadge = `<span class="status-badge error" style="margin-left: 0.5rem;" title="${tunnel.error}">TUN_ERR</span>`;
+                }
+            }
+        } else {
+            actionBtn = `<button class="cyber-button secondary" style="margin-top: 0.5rem;" onclick="window.connectHost('${host.name}')">[CONNECT]</button>`;
+            if (host.status === 'auth_required') {
+                actionBtn = `
+                <button class="cyber-button secondary" disabled style="margin-top: 0.5rem;">[CONNECT]</button>
+                <button class="cyber-button warning" style="margin-top: 0.5rem; margin-left: 0.5rem;" onclick="window.showAuthModal('${host.name}')">[AUTH]</button>
+                `;
+            }
+        }
+
+        html += `
+          <div class="host-card remote-host-card">
+            <div class="host-header">
+              <div class="host-title">
+                <span class="host-label">${host.label || host.name}</span>
+                <span class="host-name">${host.user}@${host.address}</span>
+              </div>
+              <div style="display: flex; align-items: center;">
+                <span class="status-badge ${statusClass}">${statusText}</span>
+                ${tunnelStatusBadge}
+              </div>
+            </div>
+            <div class="host-details">
+              <div class="host-detail-row">
+                <span class="host-detail-label">OpenCode</span>
+                <span class="host-detail-value">${host.opencode_version || 'Not detected'}</span>
+              </div>
+              <div class="host-detail-row">
+                <span class="host-detail-label">Latency</span>
+                <span class="host-detail-value">${host.latency_ms > 0 ? host.latency_ms + 'ms' : '-'}</span>
+              </div>
+              <div class="host-detail-row">
+                <span class="host-detail-label">SESSIONS</span>
+                <span class="host-detail-value">${host.sessionCount || 0}</span>
+              </div>
+              ${tunnel && tunnel.error ? `<div class="host-detail-row" style="color: var(--accent-error); font-size: 0.8rem; margin-top: 0.5rem; grid-column: 1 / -1;">> ${tunnel.error}</div>` : ''}
+            </div>
+            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+              ${actionBtn}
+              ${openCodeBtn}
+            </div>
+            ${projectsHtml}
+          </div>
+        `;
+      });
+      DOM.remoteHostsContainer.innerHTML = html;
+    }
+  }
+
+  if (DOM.remoteSearchInput) {
+    DOM.remoteSearchInput.addEventListener('input', (e) => {
+      remoteState.filter = e.target.value;
+      renderRemoteHosts();
+    });
+  }
+
+  if (DOM.btnRefreshRemote) {
+    DOM.btnRefreshRemote.addEventListener('click', () => {
+      fetchRemoteHosts(true);
+    });
+  }
+
   async function loadChatHistory(sessionId) {
     if(DOM.chatHistory) DOM.chatHistory.innerHTML = '';
     try {
