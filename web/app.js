@@ -632,7 +632,7 @@ function processDiffs(text) {
       if (tunnelsRes.ok) {
         remoteState.tunnels = await tunnelsRes.json();
         remoteState.serves = {};
-        await Promise.all(remoteState.tunnels.filter(t => t.state === 'connected').map(async (t) => {
+        await Promise.all(remoteState.tunnels.filter(t => t.state === 'active').map(async (t) => {
           try {
              const sr = await fetch(`/api/remote/serve/${t.hostAlias}`);
              if (sr.ok) {
@@ -682,7 +682,7 @@ window.connectHost = async function(hostName) {
     const res = await fetch('/api/remote/tunnel', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host: hostName })
+      body: JSON.stringify({ host: hostName, remotePort: 4000 })
     });
     
     if (res.status === 401 || res.status === 403 || (!res.ok && (await res.clone().json().catch(()=>({}))).code === 'AUTH_REQUIRED')) {
@@ -741,7 +741,7 @@ function startFastRefresh() {
   if (fastRefreshTimer) clearInterval(fastRefreshTimer);
   fetchRemoteHosts(true);
   fastRefreshTimer = setInterval(() => {
-    const isConnecting = (remoteState.tunnels || []).some(t => t.state === 'connecting');
+    const isConnecting = (remoteState.tunnels || []).some(t => t.state === 'connecting' || t.state === 'pending');
     if (!isConnecting) {
       clearInterval(fastRefreshTimer);
       fastRefreshTimer = null;
@@ -817,6 +817,41 @@ if(DOM.authForm) {
   });
 }
 
+  
+window.renderTunnelStatus = function(tunnel) {
+  if (!tunnel) return '<span class="tunnel-badge tunnel-none">TUN_NONE</span>';
+  switch (tunnel.state) {
+    case 'active': return '<span class="tunnel-badge tunnel-active">TUN_CONN</span>';
+    case 'connecting': return '<span class="tunnel-badge tunnel-connecting">TUN_WAIT</span>';
+    case 'pending': return '<span class="tunnel-badge tunnel-connecting">TUN_WAIT</span>';
+    case 'failed': return `<span class="tunnel-badge tunnel-failed" title="${tunnel.error || 'Failed'}">TUN_ERR</span>`;
+    case 'closed': return '<span class="tunnel-badge tunnel-none">TUN_NONE</span>';
+    default: return '<span class="tunnel-badge tunnel-none">TUN_NONE</span>';
+  }
+};
+
+window.renderTunnelActions = function(tunnel, host) {
+  if (!tunnel || tunnel.state === 'closed' || tunnel.state === 'failed') {
+    let btn = `<button class="cyber-button secondary" style="margin-top: 0.5rem;" onclick="window.connectHost('${host.name}')">[CONNECT]</button>`;
+    if (host.status === 'auth_required') {
+      btn = `<button class="cyber-button secondary" disabled style="margin-top: 0.5rem;">[CONNECT]</button>
+             <button class="cyber-button warning" style="margin-top: 0.5rem; margin-left: 0.5rem;" onclick="window.showAuthModal('${host.name}')">[AUTH]</button>`;
+    }
+    return btn;
+  }
+  
+  if (tunnel.state === 'connecting' || tunnel.state === 'pending') {
+    return `<button class="cyber-button secondary" disabled style="margin-top: 0.5rem;">[CONNECTING...]</button>
+            <button class="cyber-button error" style="margin-top: 0.5rem; margin-left: 0.5rem;" onclick="window.disconnectHost('${tunnel.id}')">[CANCEL]</button>`;
+  }
+  
+  if (tunnel.state === 'active') {
+    return `<button class="cyber-button error" style="margin-top: 0.5rem;" onclick="window.disconnectHost('${tunnel.id}')">[DISCONNECT]</button>`;
+  }
+  
+  return '';
+};
+
   function renderRemoteHosts() {
     if (!DOM.remoteHostsContainer) return;
     
@@ -824,14 +859,13 @@ if(DOM.authForm) {
     
     const visibleHosts = remoteState.hosts.filter(h => {
       if (!filterText) return true;
-      const searchable = `${h.name} ${h.address} ${h.user}`.toLowerCase();
+      const searchable = `${h.name} ${h.address} ${h.user} ${h.label || ""}`.toLowerCase();
       if (searchable.includes(filterText)) return true;
       
       if (h.projects) {
         for (const p of h.projects) {
           if (p.name.toLowerCase().includes(filterText)) return true;
-          if (p.path.toLowerCase().includes(filterText)) return true;
-        }
+          }
       }
       return false;
     });
@@ -853,6 +887,15 @@ if(DOM.authForm) {
       if(DOM.remoteErrorState) DOM.remoteErrorState.style.display = 'none';
       
       let html = '';
+
+      if (remoteState.warnings && remoteState.warnings.length > 0) {
+        html += '<div class="remote-warnings" style="margin-bottom: 1rem; padding: 0.5rem; background: rgba(255, 170, 0, 0.1); border: 1px solid var(--accent-warning); color: var(--accent-warning); border-radius: 4px;">';
+        remoteState.warnings.forEach(w => {
+          html += `<div>> WARNING: ${w}</div>`;
+        });
+        html += '</div>';
+      }
+
       visibleHosts.forEach((host, hIdx) => {
         let statusClass = host.status === 'online' ? 'active' : 'error';
         let statusText = host.status.toUpperCase();
@@ -903,7 +946,7 @@ if(DOM.authForm) {
                       <span class="project-name">${p.name}</span>
                       <span class="project-sessions" style="display: flex; align-items: center; gap: 0.5rem;">
                         ${sessionCount} session(s)
-                        ${tunnel && tunnel.state === 'connected' ? `<button class="cyber-button secondary" style="font-size: 0.6rem; padding: 0.1rem 0.3rem;" onclick="event.stopPropagation(); window.openOpencode('${host.name}', '${p.path}')">OPEN IDE</button>` : ''}
+                        ${tunnel && tunnel.state === 'active' ? `<button class="cyber-button secondary" style="font-size: 0.6rem; padding: 0.1rem 0.3rem;" onclick="event.stopPropagation(); window.openOpencode('${host.name}', '${p.name}')">OPEN IDE</button>` : ''}
                         ${sessionCount > 0 ? `<span id="${projectId}-toggle" style="font-size: 0.7rem; color: var(--accent-secondary);">${isExpanded ? '[-]' : '[+]'}</span>` : ''}
                       </span>
                     </div>
@@ -915,44 +958,24 @@ if(DOM.authForm) {
           `;
         }
 
-        let actionBtn = '';
+        
+        let actionBtn = window.renderTunnelActions(tunnel, host);
         let openCodeBtn = '';
-        let tunnelStatusBadge = '';
+        let tunnelStatusBadge = window.renderTunnelStatus(tunnel);
         
         const serveStatus = (remoteState.serves || {})[host.name] || (remoteState.serves || {})[host.address];
         
-        if (tunnel) {
-            if (tunnel.state === 'connected') {
-                actionBtn = `<button class="cyber-button error" style="margin-top: 0.5rem;" onclick="window.disconnectHost('${tunnel.id}')">[DISCONNECT]</button>`;
-                tunnelStatusBadge = `<span class="status-badge active" style="margin-left: 0.5rem;">TUN_CONN</span>`;
-                if (serveStatus && serveStatus.state === 'running') {
-                    openCodeBtn = `<span class="status-badge active" style="margin-top: 0.5rem; margin-left: 0.5rem;">SERVE_RUNNING</span>`;
-                } else if (serveStatus && serveStatus.state === 'starting') {
-                    openCodeBtn = `<span class="status-badge idle" style="margin-top: 0.5rem; margin-left: 0.5rem;">SERVE_STARTING</span>`;
-                } else {
-                    openCodeBtn = `<button class="cyber-button primary" style="margin-top: 0.5rem; margin-left: 0.5rem;" onclick="window.startServe('${host.name}', '~')">[START_SERVE]</button>`;
-                }
-            } else if (tunnel.state === 'connecting') {
-                actionBtn = `<button class="cyber-button secondary" disabled style="margin-top: 0.5rem;">[CONNECTING...]</button>
-                             <button class="cyber-button error" style="margin-top: 0.5rem; margin-left: 0.5rem;" onclick="window.disconnectHost('${tunnel.id}')">[CANCEL]</button>`;
-                tunnelStatusBadge = `<span class="status-badge idle" style="margin-left: 0.5rem;">TUN_WAIT</span>`;
+        if (tunnel && tunnel.state === 'active') {
+            if (serveStatus && serveStatus.state === 'running') {
+                openCodeBtn = `<span class="status-badge active" style="margin-top: 0.5rem; margin-left: 0.5rem;">SERVE_RUNNING</span>`;
+            } else if (serveStatus && serveStatus.state === 'starting') {
+                openCodeBtn = `<span class="status-badge idle" style="margin-top: 0.5rem; margin-left: 0.5rem;">SERVE_STARTING</span>`;
             } else {
-                actionBtn = `<button class="cyber-button secondary" style="margin-top: 0.5rem;" onclick="window.connectHost('${host.name}')">[CONNECT]</button>`;
-                if (tunnel.state === 'error') {
-                    tunnelStatusBadge = `<span class="status-badge error" style="margin-left: 0.5rem;" title="${tunnel.error}">TUN_ERR</span>`;
-                }
-            }
-        } else {
-            actionBtn = `<button class="cyber-button secondary" style="margin-top: 0.5rem;" onclick="window.connectHost('${host.name}')">[CONNECT]</button>`;
-            if (host.status === 'auth_required') {
-                actionBtn = `
-                <button class="cyber-button secondary" disabled style="margin-top: 0.5rem;">[CONNECT]</button>
-                <button class="cyber-button warning" style="margin-top: 0.5rem; margin-left: 0.5rem;" onclick="window.showAuthModal('${host.name}')">[AUTH]</button>
-                `;
+                openCodeBtn = `<button class="cyber-button primary" style="margin-top: 0.5rem; margin-left: 0.5rem;" onclick="window.startServe('${host.name}', '~')">[START_SERVE]</button>`;
             }
         }
-
-        html += `
+        
+html += `
           <div class="host-card remote-host-card">
             <div class="host-header">
               <div class="host-title">
