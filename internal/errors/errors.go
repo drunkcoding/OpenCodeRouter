@@ -19,6 +19,10 @@ func HTTPStatus(err error) int {
 	switch {
 	case isSessionNotFound(err):
 		return http.StatusNotFound
+	case stderrors.Is(err, session.ErrWorkspacePathRequired), stderrors.Is(err, session.ErrWorkspacePathInvalid):
+		return http.StatusBadRequest
+	case stderrors.Is(err, session.ErrSessionAlreadyExists), stderrors.Is(err, session.ErrSessionStopped):
+		return http.StatusConflict
 	case isPortExhausted(err):
 		return http.StatusServiceUnavailable
 	case stderrors.Is(err, ErrAuthFailed):

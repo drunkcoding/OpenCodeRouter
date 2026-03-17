@@ -27,6 +27,12 @@ func TestDefaults_NonZero(t *testing.T) {
 	if cfg.ScanPortEnd == 0 {
 		t.Error("ScanPortEnd should not be zero")
 	}
+	if cfg.SessionPortStart == 0 {
+		t.Error("SessionPortStart should not be zero")
+	}
+	if cfg.SessionPortEnd == 0 {
+		t.Error("SessionPortEnd should not be zero")
+	}
 	if cfg.ScanInterval == 0 {
 		t.Error("ScanInterval should not be zero")
 	}
@@ -48,6 +54,9 @@ func TestDefaults_PortRange(t *testing.T) {
 	cfg := Defaults()
 	if cfg.ScanPortEnd <= cfg.ScanPortStart {
 		t.Errorf("ScanPortEnd (%d) should be > ScanPortStart (%d)", cfg.ScanPortEnd, cfg.ScanPortStart)
+	}
+	if cfg.SessionPortEnd <= cfg.SessionPortStart {
+		t.Errorf("SessionPortEnd (%d) should be > SessionPortStart (%d)", cfg.SessionPortEnd, cfg.SessionPortStart)
 	}
 }
 
@@ -104,6 +113,31 @@ func TestValidate_ScanPortEndTooHigh(t *testing.T) {
 	cfg.ScanPortEnd = 70000
 	if err := cfg.Validate(); err == nil {
 		t.Error("expected error when ScanPortEnd > 65535")
+	}
+}
+
+func TestValidate_InvalidSessionPortStart(t *testing.T) {
+	cfg := Defaults()
+	cfg.SessionPortStart = 0
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for SessionPortStart == 0")
+	}
+}
+
+func TestValidate_SessionPortEndBeforeStart(t *testing.T) {
+	cfg := Defaults()
+	cfg.SessionPortStart = 5200
+	cfg.SessionPortEnd = 5100
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error when SessionPortEnd < SessionPortStart")
+	}
+}
+
+func TestValidate_SessionPortEndTooHigh(t *testing.T) {
+	cfg := Defaults()
+	cfg.SessionPortEnd = 70000
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error when SessionPortEnd > 65535")
 	}
 }
 

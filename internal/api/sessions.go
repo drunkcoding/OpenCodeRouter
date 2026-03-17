@@ -388,19 +388,11 @@ func (h *SessionsHandler) clearAttachments(id string) {
 }
 
 func (h *SessionsHandler) writeSessionManagerError(w http.ResponseWriter, err error) {
-	switch errorx.Code(err) {
-	case "WORKSPACE_PATH_REQUIRED", "WORKSPACE_PATH_INVALID":
-		writeAPIError(w, http.StatusBadRequest, errorx.Message(err), errorx.Code(err))
-	case "SESSION_ALREADY_EXISTS", "SESSION_STOPPED":
-		writeAPIError(w, http.StatusConflict, errorx.Message(err), errorx.Code(err))
-	case "SESSION_NOT_FOUND", "NO_AVAILABLE_SESSION_PORTS", "TERMINAL_ATTACH_UNAVAILABLE", "DAEMON_UNHEALTHY":
-		writeAPIError(w, errorx.HTTPStatus(err), errorx.Message(err), errorx.Code(err))
-	case "REQUEST_CANCELED", "REQUEST_TIMEOUT":
-		writeAPIError(w, errorx.HTTPStatus(err), errorx.Message(err), errorx.Code(err))
-	default:
+	status := errorx.HTTPStatus(err)
+	if status == http.StatusInternalServerError {
 		h.logger.Error("session handler error", "error", err)
-		writeAPIError(w, http.StatusInternalServerError, errorx.Message(err), errorx.Code(err))
 	}
+	writeAPIError(w, status, errorx.Message(err), errorx.Code(err))
 }
 
 func parseSessionPath(path string) (id string, action string, ok bool) {
@@ -529,16 +521,23 @@ func (h *SessionsHandler) handleChatHistory(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	emptyHistory := []map[string]interface{}{}
+
 	client, err := daemon.NewDaemonClient(fmt.Sprintf("http://127.0.0.1:%d", handle.DaemonPort), daemon.ClientConfig{})
 	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, err.Error(), "DAEMON_CLIENT_ERROR")
+		h.logger.Warn("chat history daemon client unavailable; returning empty history", "session_id", id, "error", err)
+		writeJSON(w, http.StatusOK, emptyHistory)
 		return
 	}
 
 	msgs, err := client.GetMessages(r.Context(), id)
 	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, err.Error(), "GET_MESSAGES_ERROR")
+		h.logger.Warn("chat history unavailable; returning empty history", "session_id", id, "error", err)
+		writeJSON(w, http.StatusOK, emptyHistory)
 		return
+	}
+	if msgs == nil {
+		msgs = emptyHistory
 	}
 
 	writeJSON(w, http.StatusOK, msgs)

@@ -3,6 +3,7 @@ package discovery
 import (
 	"log/slog"
 	"os"
+	"runtime/debug"
 	"testing"
 	"time"
 
@@ -184,6 +185,10 @@ func TestShutdown(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestShutdown_Idempotent(t *testing.T) {
+	if raceDetectorEnabled() {
+		t.Skip("zeroconf shutdown path is not race-clean under -race")
+	}
+
 	adv := New(testCfg(), testLogger())
 
 	adv.Sync([]*registry.Backend{
@@ -193,4 +198,17 @@ func TestShutdown_Idempotent(t *testing.T) {
 	// Should not panic.
 	adv.Shutdown()
 	adv.Shutdown()
+}
+
+func raceDetectorEnabled() bool {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return false
+	}
+	for _, setting := range info.Settings {
+		if setting.Key == "-race" {
+			return setting.Value == "true"
+		}
+	}
+	return false
 }

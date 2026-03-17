@@ -13,7 +13,6 @@
   "main": "./out/extension.js",
   "activationEvents": [
     "onView:opencodeSessions",
-    "onView:opencodeRemoteHosts",
     "onView:opencodeChat",
     "onTerminalProfile:opencode.terminalProfile",
     "onCommand:opencode.attachSession",
@@ -21,7 +20,6 @@
     "onCommand:opencode.openChat",
     "onCommand:opencode.openTerminal",
     "onCommand:opencode.refreshSessions",
-    "onCommand:opencode.refreshRemoteHosts",
     "onCommand:opencode.stopSession",
     "onCommand:opencode.restartSession",
     "onCommand:opencode.deleteSession",
@@ -43,10 +41,6 @@
         {
           "id": "opencodeSessions",
           "name": "Sessions"
-        },
-        {
-          "id": "opencodeRemoteHosts",
-          "name": "Remote Hosts"
         },
         {
           "id": "opencodeChat",
@@ -77,11 +71,6 @@
       {
         "command": "opencode.refreshSessions",
         "title": "OpenCode: Refresh Sessions",
-        "icon": "$(refresh)"
-      },
-      {
-        "command": "opencode.refreshRemoteHosts",
-        "title": "OpenCode: Refresh Remote Hosts",
         "icon": "$(refresh)"
       },
       {
@@ -124,11 +113,6 @@
           "command": "opencode.refreshSessions",
           "when": "view == opencodeSessions",
           "group": "navigation@2"
-        },
-        {
-          "command": "opencode.refreshRemoteHosts",
-          "when": "view == opencodeRemoteHosts",
-          "group": "navigation@1"
         },
         {
           "command": "opencode.openChat",
@@ -195,17 +179,6 @@
           "type": "string",
           "default": "",
           "description": "Optional bearer token for control plane API requests."
-        },
-        "opencode.remoteSshConfigPath": {
-          "type": "string",
-          "default": "",
-          "description": "Optional SSH config path override for remote host discovery (for example ~/.ssh/config)."
-        },
-        "opencode.remoteHostsAutoRefreshSeconds": {
-          "type": "number",
-          "default": 30,
-          "minimum": 0,
-          "description": "Automatic refresh interval for Remote Hosts view in seconds (0 disables auto-refresh)."
         }
       }
     }

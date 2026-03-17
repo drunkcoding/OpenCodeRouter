@@ -449,16 +449,25 @@ func TestE2EMainWiringAssumptions(t *testing.T) {
 		t.Fatalf("read main.go: %v", err)
 	}
 	text := string(contents)
+	if !strings.Contains(text, "runRouter(cfg, projectPaths, logger)") {
+		t.Fatalf("main.go missing runRouter decomposition marker")
+	}
+
+	appContents, err := os.ReadFile(filepath.Join(root, "app.go"))
+	if err != nil {
+		t.Fatalf("read app.go: %v", err)
+	}
+	appText := string(appContents)
 	required := []string{
-		"session.NewManager(",
+		"session.NewManager(session.ManagerConfig{",
 		"api.NewRouter(api.RouterConfig{",
 		"SessionManager:  sessionMgr",
 		"SessionEventBus: eventBus",
 		"AuthConfig:      auth.LoadFromEnv()",
 	}
 	for _, needle := range required {
-		if !strings.Contains(text, needle) {
-			t.Fatalf("main.go missing wiring marker: %q", needle)
+		if !strings.Contains(appText, needle) {
+			t.Fatalf("app.go missing wiring marker: %q", needle)
 		}
 	}
 
@@ -649,9 +658,9 @@ func TestE2EOfflineIndicatorBehaviorContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read web/index.html: %v", err)
 	}
-	appBytes, err := os.ReadFile(filepath.Join(root, "web", "app.js"))
+	appBytes, err := os.ReadFile(filepath.Join(root, "web", "js", "api.js"))
 	if err != nil {
-		t.Fatalf("read web/app.js: %v", err)
+		t.Fatalf("read web/js/api.js: %v", err)
 	}
 
 	indexText := string(indexBytes)
@@ -667,9 +676,12 @@ func TestE2EOfflineIndicatorBehaviorContract(t *testing.T) {
 	if !strings.Contains(indexText, checks[0]) {
 		t.Fatalf("index.html missing offline default indicator marker %q", checks[0])
 	}
+	if !strings.Contains(indexText, "<script type=\"module\" src=\"/js/main.js\"></script>") {
+		t.Fatalf("index.html missing module entrypoint marker %q", "/js/main.js")
+	}
 	for _, marker := range checks[1:] {
 		if !strings.Contains(appText, marker) {
-			t.Fatalf("app.js missing offline/reconnect marker %q", marker)
+			t.Fatalf("web/js/api.js missing offline/reconnect marker %q", marker)
 		}
 	}
 }

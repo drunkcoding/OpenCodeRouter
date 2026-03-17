@@ -19,7 +19,9 @@ type Config struct {
 	// ScanPortStart is the beginning of the port range to scan (inclusive).
 	ScanPortStart int
 	// ScanPortEnd is the end of the port range to scan (inclusive).
-	ScanPortEnd int
+	ScanPortEnd      int
+	SessionPortStart int
+	SessionPortEnd   int
 	// ScanInterval controls how often the scanner runs.
 	ScanInterval time.Duration
 	// ScanConcurrency is the max number of concurrent port probes.
@@ -41,18 +43,23 @@ func Defaults() Config {
 		username = u.Username
 	}
 
+	scanStart := 30000
+	scanEnd := 31000
+
 	return Config{
-		ListenPort:      8080,
-		ListenAddr:      "0.0.0.0:8080",
-		Username:        username,
-		ScanPortStart:   30000,
-		ScanPortEnd:     31000,
-		ScanInterval:    5 * time.Second,
-		ScanConcurrency: 20,
-		ProbeTimeout:    800 * time.Millisecond,
-		StaleAfter:      30 * time.Second,
-		EnableMDNS:      true,
-		MDNSServiceType: "_opencode._tcp",
+		ListenPort:       8080,
+		ListenAddr:       "0.0.0.0:8080",
+		Username:         username,
+		ScanPortStart:    scanStart,
+		ScanPortEnd:      scanEnd,
+		SessionPortStart: scanStart + 100,
+		SessionPortEnd:   scanEnd + 100,
+		ScanInterval:     5 * time.Second,
+		ScanConcurrency:  20,
+		ProbeTimeout:     800 * time.Millisecond,
+		StaleAfter:       30 * time.Second,
+		EnableMDNS:       true,
+		MDNSServiceType:  "_opencode._tcp",
 	}
 }
 
@@ -69,6 +76,15 @@ func (c *Config) Validate() error {
 	}
 	if c.ScanPortEnd > 65535 {
 		return fmt.Errorf("scan port end must be <= 65535, got %d", c.ScanPortEnd)
+	}
+	if c.SessionPortStart < 1 || c.SessionPortStart > 65535 {
+		return fmt.Errorf("session port start must be 1-65535, got %d", c.SessionPortStart)
+	}
+	if c.SessionPortEnd < c.SessionPortStart {
+		return fmt.Errorf("session port end (%d) must be >= start (%d)", c.SessionPortEnd, c.SessionPortStart)
+	}
+	if c.SessionPortEnd > 65535 {
+		return fmt.Errorf("session port end must be <= 65535, got %d", c.SessionPortEnd)
 	}
 	if c.Username == "" {
 		return fmt.Errorf("username must not be empty")

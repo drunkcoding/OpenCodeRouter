@@ -1,12 +1,10 @@
 # OpenCodeRouter
 
-A long-running HTTP reverse proxy that auto-discovers [OpenCode](https://opencode.ai) `serve` / ACP instances on a shared server and routes traffic to them via per-project domains. Also ships **`ocr`** — a terminal UI for discovering and managing OpenCode sessions across remote SSH hosts.
+A long-running HTTP reverse proxy that auto-discovers [OpenCode](https://opencode.ai) `serve` / ACP instances on a shared server and routes traffic to them via per-project domains.
 
 Each discovered project gets its own hostname containing the owner's username (e.g. `myproject-alice.local`), and is advertised over mDNS so other machines on the LAN can find it.
 
-The router can also **manage the lifecycle** of `opencode serve` instances — pass project directories as arguments and it will start them on launch and stop them on shutdown.
-
-The **`ocr`** (OpenCode Remote) TUI reads your `~/.ssh/config`, probes each host for running OpenCode instances, and presents all sessions in a searchable, hierarchical terminal dashboard.
+The router can also **manage the lifecycle** of `opencode serve` instances. Pass project directories as arguments and it will start them on launch and stop them on shutdown.
 
 ## How it works
 
@@ -44,12 +42,6 @@ Or build from source:
 ```bash
 git clone https://github.com/your-org/OpenCodeRouter.git
 cd OpenCodeRouter
-go build -o opencoderouter .
-
-# Build the remote session TUI
-go build -o bin/ocr ./cmd/ocr
-
-# Or use make for both
 make build
 ```
 
@@ -410,164 +402,22 @@ Sends SIGTERM to every running `opencode serve` process.
 ./oc-kill
 ```
 
-## OpenCode Remote TUI (`ocr`)
-
-A keyboard-driven terminal UI for managing OpenCode sessions across your entire fleet of SSH hosts. Think `k9s` for OpenCode.
-
-### Features
-
-- **Auto-discovery** — reads `~/.ssh/config`, resolves hosts via `ssh -G`, probes for `opencode` installations
-- **Hierarchical view** — Host → Project → Sessions, collapsible tree with vim-style navigation
-- **Live status** — 🟢 ACTIVE / 💤 IDLE / 🔴 ERRORED indicators, braille spinner (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏) for thinking sessions
-- **Fuzzy search** — filter across host names, project paths, session titles, and IDs
-- **Session actions** — attach, create, inspect, kill/archive
-- **Auto-refresh** — configurable polling with visual countdown
-- **Parallel probing** — worker pool with connection multiplexing (SSH ControlMaster)
-- **Themes** — Auto (adapts to terminal background, default), Night Ops (dark), Light, Minimal (ASCII-safe fallback)
-
-### Quick start
-
-```bash
-# Build
-make build
-
-# Run
-./bin/ocr
-
-# With custom config
-./bin/ocr --config ~/.opencode/remote-tui.yaml
-```
-
-### Keybindings
-
-| Key | Action |
-|---|---|
-| `Enter` | If a session row is selected, attach to that session. On host or project rows, expand or collapse the node. |
-| `Space` | Expand or collapse the selected host or project node, same as Enter on non-session rows. |
-| `↑/↓` or `k/j` | Move selection up or down in the tree. |
-| `←/→` or `h/l` | Collapse or expand tree nodes. |
-| `/` | Focus search input. |
-| `r` | Refresh all hosts and sessions. |
-| `n` | Open "new session" prompt for the selected host or project. |
-| `d` | Kill or archive the selected session. |
-| `g` | Clone a git repository on the selected host and start OpenCode in the clone. |
-| `i` | Show the inspect panel for the selected session. |
-| `Tab` | Toggle the inspect panel on or off. |
-| `a` | Show SSH auth bootstrap commands for an auth-required or blocked host. |
-| `e` | Open details for the last error when an error toast is visible. |
-| `Esc` | Close the active modal or error dialog. |
-| `q` | Quit the TUI. |
-
-### Configuration
-
-Create `~/.opencode/remote-tui.yaml` (auto-generated with defaults on first run):
-
-```yaml
-polling:
-  interval: 30s        # How often to re-probe hosts
-  timeout: 10s         # SSH connect timeout per host
-  max_parallel: 10     # Concurrent SSH connections
-
-display:
-  theme: auto          # auto, nightops, light, minimal
-  unicode: true        # false for ASCII-only terminals
-  animation: true      # Braille spinners, countdowns
-  active_threshold: 10m  # Sessions active within this = ACTIVE
-  idle_threshold: 24h    # Sessions older than this are dimmed
-
-hosts:
-  include: ["*"]       # Glob patterns to include from SSH config
-  ignore: ["backup-*"] # Glob patterns to exclude
-  groups:               # Logical grouping in the tree
-    production: ["prod-*"]
-    development: ["dev-*"]
-  overrides:
-    my-server:
-      label: "Main API Server"
-      priority: 1      # Lower = higher in the list
-      opencode_path: /usr/local/bin/opencode
-
-ssh:
-  control_master: auto   # SSH ControlMaster for connection reuse
-  control_persist: 60    # Keep control socket alive (seconds)
-  batch_mode: true       # Non-interactive SSH (no password prompts)
-
-sessions:
-  sort_by: last_activity # last_activity, name, host
-  show_archived: false
-  max_display: 50
-  enrich_from_db: true   # Query SQLite for message counts, agents
-
-keybindings:
-  attach: enter         # Attach to selected session
-  search: /
-  refresh: r
-  quit: q
-  new_session: n        # New session on selected host or project
-  kill_session: d
-  git_clone: g
-  inspect: i
-  cycle_view: tab       # Toggle inspect panel
-  authenticate: a
-  error_detail: e       # Open last error details when an error toast is shown
-```
-
-### How probing works
-
-```
-~/.ssh/config
-      │
-      ▼  parse Host entries
-  ┌───────────────────┐
-  │  DiscoveryService  │  ssh -G <host> → resolve real hostname/user/port
-  └────────┬──────────┘
-           ▼  for each host (parallel)
-  ┌───────────────────┐
-  │   ProbeWorkerPool  │  ssh -o BatchMode=yes <host> \
-  │                    │    'command -v opencode && opencode session list --format json'
-  └────────┬──────────┘
-           ▼  TTL cache + stale-while-revalidate
-  ┌───────────────────┐
-  │    TUI TreeView    │  Host → Project → Sessions (ranked by last_activity)
-  └───────────────────┘
-```
-
-Each probe is a single SSH round-trip. Unreachable hosts show as ○ offline and are retried on the next polling cycle.
-
 ## Project structure
 
 ```
 ├── main.go                        # Router entry point, CLI flags, orchestration
-├── cmd/ocr/
-│   └── main.go                    # Remote TUI entry point (cobra CLI)
 ├── oc                             # Batch-start opencode serve instances (standalone)
 ├── oc-kill                        # Kill all opencode serve instances (standalone)
 ├── internal/
 │   ├── config/config.go           # Router configuration types, defaults, validation
-│   ├── auth/                       # Auth + CORS env configuration and middleware integration
-│   ├── api/                        # Session lifecycle API, SSE events, scrollback APIs
+│   ├── auth/                      # Auth + CORS env configuration and middleware integration
+│   ├── api/                       # Session lifecycle API, SSE events, scrollback APIs
 │   ├── launcher/launcher.go       # Manages opencode serve child processes
 │   ├── registry/registry.go       # Thread-safe backend registry
 │   ├── scanner/scanner.go         # Parallel port scanner + OpenCode probing
 │   ├── discovery/discovery.go     # mDNS advertisement via zeroconf
 │   ├── proxy/proxy.go             # Reverse proxy, routing, dashboard
-│   ├── session/                    # Session manager, health checks, circuit breaker
-│   └── terminal/                   # Terminal websocket handler + bridge
-│   └── tui/                        # Remote session TUI (ocr)
-│       ├── app.go                 # Top-level Bubble Tea model
-│       ├── components/
-│       │   ├── header.go          # Search bar, refresh countdown, fleet stats
-│       │   ├── tree.go            # Collapsible Host→Project→Session tree
-│       │   ├── inspect.go         # Session detail panel
-│       │   ├── footer.go          # Context-sensitive keybinding hints
-│       │   ├── modal.go           # Overlay dialogs
-│       │   └── spinner.go         # Braille animation component
-│       ├── config/                # TUI-specific config + YAML loader
-│       ├── discovery/             # SSH config parser + host resolver
-│       ├── probe/                 # SSH probe worker pool + TTL cache
-│       ├── model/                 # Domain types + Bubble Tea messages
-│       ├── theme/                 # Lipgloss style themes (auto, nightops, light, minimal)
-│       └── keys/                  # Keybinding definitions
+│   ├── session/                   # Session manager, health checks, circuit breaker
 ├── go.mod
 └── go.sum
 ```

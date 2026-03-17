@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -558,6 +561,97 @@ func TestSessionsHandlerUnavailableManager(t *testing.T) {
 
 	resp := doJSONRequest(t, srv.Client(), http.MethodGet, srv.URL+"/api/sessions", nil)
 	assertErrorShape(t, resp, http.StatusServiceUnavailable, "SESSION_MANAGER_UNAVAILABLE")
+}
+
+func TestSessionsChatHistoryUnavailableReturnsEmptyArray(t *testing.T) {
+	mgr := newFakeStatefulSessionManager()
+	created, err := mgr.Create(context.Background(), session.CreateOpts{WorkspacePath: t.TempDir()})
+	if err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	srv := newSessionsTestServer(t, mgr)
+	defer srv.Close()
+
+	resp := doJSONRequest(t, srv.Client(), http.MethodGet, srv.URL+"/api/sessions/"+created.ID+"/chat", nil)
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		t.Fatalf("chat history status=%d want=%d", resp.StatusCode, http.StatusOK)
+	}
+	defer resp.Body.Close()
+
+	history := decodeResponseJSON[[]map[string]any](t, resp.Body)
+	if len(history) != 0 {
+		t.Fatalf("expected empty chat history when daemon unavailable, got %#v", history)
+	}
+}
+
+func TestSessionsChatHistoryNonJSONPayloadReturnsEmptyArray(t *testing.T) {
+	daemonSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not-json"))
+	}))
+	defer daemonSrv.Close()
+
+	port := mustPortFromURL(t, daemonSrv.URL)
+
+	mgr := newFakeStatefulSessionManager()
+	created, err := mgr.Create(context.Background(), session.CreateOpts{WorkspacePath: t.TempDir()})
+	if err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	mgr.mu.Lock()
+	h := mgr.sessions[created.ID]
+	h.DaemonPort = port
+	mgr.sessions[created.ID] = h
+	mgr.mu.Unlock()
+
+	srv := newSessionsTestServer(t, mgr)
+	defer srv.Close()
+
+	resp := doJSONRequest(t, srv.Client(), http.MethodGet, srv.URL+"/api/sessions/"+created.ID+"/chat", nil)
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		t.Fatalf("chat history status=%d want=%d", resp.StatusCode, http.StatusOK)
+	}
+	defer resp.Body.Close()
+
+	history := decodeResponseJSON[[]map[string]any](t, resp.Body)
+	if len(history) != 0 {
+		t.Fatalf("expected empty chat history on non-JSON payload, got %#v", history)
+	}
+}
+
+func TestSessionsChatHistoryInvalidSessionIDReturnsNotFound(t *testing.T) {
+	mgr := newFakeStatefulSessionManager()
+	srv := newSessionsTestServer(t, mgr)
+	defer srv.Close()
+
+	resp := doJSONRequest(t, srv.Client(), http.MethodGet, srv.URL+"/api/sessions/missing-session/chat", nil)
+	assertErrorShape(t, resp, http.StatusNotFound, "SESSION_NOT_FOUND")
+}
+
+func mustPortFromURL(t *testing.T, raw string) int {
+	t.Helper()
+
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse url %q: %v", raw, err)
+	}
+
+	_, portStr, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		t.Fatalf("split host/port %q: %v", parsed.Host, err)
+	}
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("atoi port %q: %v", portStr, err)
+	}
+
+	return port
 }
 
 func TestDecodeJSONBodyRejectsTrailingPayload(t *testing.T) {

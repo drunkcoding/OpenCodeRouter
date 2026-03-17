@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import { ChatSessionTarget, ChatWebviewProvider } from './chat/ChatWebviewProvider';
 import { DiffEditManager } from './edits/DiffEditManager';
-import { RemoteHostsTreeProvider } from './remote/RemoteHostsTreeProvider';
 import { OpenCodeTerminalBridge } from './terminal/OpenCodeTerminalBridge';
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
@@ -457,18 +456,13 @@ class ConnectionStatusBar implements vscode.Disposable {
 export function activate(context: vscode.ExtensionContext): void {
   const statusBar = new ConnectionStatusBar();
   const treeProvider = new SessionTreeProvider((state, detail) => statusBar.update(state, detail));
-  const remoteHostsProvider = new RemoteHostsTreeProvider(
-    () => getControlPlaneUrlFromConfig(),
-    () => getAuthTokenFromConfig()
-  );
   const chatProvider = new ChatWebviewProvider(context.extensionUri);
   const diffEditManager = new DiffEditManager((sessionId) =>
     treeProvider.getSessions().find((session) => session.id === sessionId)?.workspacePath
   );
 
-  context.subscriptions.push(statusBar, treeProvider, remoteHostsProvider, chatProvider, diffEditManager);
+  context.subscriptions.push(statusBar, treeProvider, chatProvider, diffEditManager);
   context.subscriptions.push(vscode.window.registerTreeDataProvider('opencodeSessions', treeProvider));
-  context.subscriptions.push(vscode.window.registerTreeDataProvider('opencodeRemoteHosts', remoteHostsProvider));
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider('opencodeChat', chatProvider, {
       webviewOptions: { retainContextWhenHidden: true }
@@ -481,16 +475,6 @@ export function activate(context: vscode.ExtensionContext): void {
         await treeProvider.refresh();
       } catch (error) {
         vscode.window.showErrorMessage(`Failed to refresh sessions: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    })
-  );
-
-  context.subscriptions.push(
-    vscode.commands.registerCommand('opencode.refreshRemoteHosts', async () => {
-      try {
-        await remoteHostsProvider.refresh(true);
-      } catch (error) {
-        vscode.window.showErrorMessage(`Failed to refresh remote hosts: ${error instanceof Error ? error.message : String(error)}`);
       }
     })
   );
@@ -680,9 +664,6 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   void treeProvider.start();
-  void remoteHostsProvider.start().catch((error) => {
-    vscode.window.showWarningMessage(`Remote hosts unavailable: ${error instanceof Error ? error.message : String(error)}`);
-  });
 }
 
 export function deactivate(): void {

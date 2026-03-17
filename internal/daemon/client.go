@@ -208,11 +208,10 @@ func (c *Client) SendMessage(ctx context.Context, sessionID, prompt string) (<-c
 		defer cancelStream()
 
 		postCh := make(chan postResult, 1)
-		go func() {
+		go func(ch chan<- postResult) {
 			payload, postErr := c.postMessage(ctx, sessionID, prompt)
-			postCh <- postResult{payload: payload, err: postErr}
-			close(postCh)
-		}()
+			ch <- postResult{payload: payload, err: postErr}
+		}(postCh)
 
 		var (
 			postDone bool

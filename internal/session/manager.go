@@ -644,16 +644,17 @@ func (m *Manager) createWithID(ctx context.Context, id string, opts CreateOpts, 
 	}
 
 	now := m.now()
+	initialHandle := SessionHandle{
+		ID:            id,
+		DaemonPort:    port,
+		WorkspacePath: validatedOpts.WorkspacePath,
+		Status:        SessionStatusActive,
+		CreatedAt:     now,
+		LastActivity:  now,
+		Labels:        cloneStringMap(validatedOpts.Labels),
+	}
 	record := &managedSession{
-		handle: SessionHandle{
-			ID:            id,
-			DaemonPort:    port,
-			WorkspacePath: validatedOpts.WorkspacePath,
-			Status:        SessionStatusActive,
-			CreatedAt:     now,
-			LastActivity:  now,
-			Labels:        cloneStringMap(validatedOpts.Labels),
-		},
+		handle: initialHandle,
 		opts:    cloneCreateOpts(validatedOpts),
 		process: proc,
 		health: HealthStatus{
@@ -687,7 +688,7 @@ func (m *Manager) createWithID(ctx context.Context, id string, opts CreateOpts, 
 		m.registry.Upsert(port, projectName, validatedOpts.WorkspacePath, "")
 	}
 
-	snapshot := cloneSessionHandle(record.handle)
+	snapshot := cloneSessionHandle(initialHandle)
 	m.publishEvent(SessionCreated{At: now, Session: snapshot})
 
 	return &snapshot, nil

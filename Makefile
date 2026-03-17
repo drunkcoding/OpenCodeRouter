@@ -1,18 +1,21 @@
-BINARY ?= ocr
+BINARY ?= opencoderouter
 BUILD_DIR ?= bin
-PKG ?= ./cmd/ocr
+PKG ?= .
 
-.PHONY: build install lint test
+.PHONY: build install lint test run
 
 build:
 	mkdir -p $(BUILD_DIR)
-	go build -o $(BUILD_DIR)/$(BINARY) $(PKG)
+	GOFLAGS="-buildvcs=false" go build -o $(BUILD_DIR)/$(BINARY) $(PKG)
 
 install:
-	go install $(PKG)
+	GOFLAGS="-buildvcs=false" go install $(PKG)
 
 lint:
 	go vet ./...
 
 test:
 	go test ./...
+
+run:
+	go run . $(ARGS)

@@ -17,7 +17,10 @@ The codebase contains two major runtime surfaces:
    and diff workflow integration.
 
 The architecture below applies to the control plane plus browser and extension
-clients.
+clients. This worktree does not include the historical remote TUI or SSH
+fleet-aware control plane, all management happens against a single local
+control-plane process that you can still expose remotely with standard SSH
+port forwarding.
 
 ## 2. System Architecture (ASCII)
 
@@ -269,7 +272,7 @@ Validation constraints:
 
 | Setting | Default | Notes |
 |---|---:|---|
-| session port range | `30000..31000` | overridden by manager config from `main.go` (`scan range + 100`) |
+| session port range | `30100..31100` | derived from scan range + 100 via `config.Config.SessionPortStart/End` (manager falls back to `30000..31000` if no override provided) |
 | health interval | `10s` | periodic health loop |
 | health timeout | `2s` | per-probe context timeout |
 | health fail threshold | `3` | opens circuit breaker |
@@ -455,7 +458,7 @@ Recovery:
 - Scrollback API: `internal/api/scrollback.go`
 - Session manager core: `internal/session/manager.go`
 - Terminal websocket endpoint: `internal/terminal/handler.go`
-- Browser client: `web/app.js`, `web/index.html`
+- Browser client: `web/js/main.js`, `web/index.html`
 - VS Code extension host: `vscode-extension/src/extension.ts`
 
 ## 10. Summary
