@@ -1,5 +1,43 @@
 import * as vscode from 'vscode';
 
+type TerminalLogLevel = 'INFO' | 'WARN' | 'ERROR';
+
+let terminalLogChannel: vscode.OutputChannel | undefined;
+
+function getTerminalLogChannel(): vscode.OutputChannel {
+  if (!terminalLogChannel) {
+    terminalLogChannel = vscode.window.createOutputChannel('OpenCode Control Plane');
+  }
+  return terminalLogChannel;
+}
+
+function logTerminal(level: TerminalLogLevel, message: string, error?: unknown): void {
+  const channel = getTerminalLogChannel();
+  const detail = formatLogError(error);
+  const text = detail ? `${message} | ${detail}` : message;
+  channel.appendLine(`[${new Date().toISOString()}] [${level}] ${text}`);
+}
+
+function formatLogError(error: unknown): string {
+  if (!error) {
+    return '';
+  }
+
+  if (error instanceof Error) {
+    return error.stack?.trim() || error.message;
+  }
+
+  if (typeof error === 'string') {
+    return error;
+  }
+
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
 export interface TerminalSessionTarget {
   id: string;
   label: string;
@@ -60,12 +98,22 @@ export class OpenCodeTerminalBridge implements vscode.Pseudoterminal {
       return;
     }
 
+    logTerminal(
+      'INFO',
+      `terminal bridge connect | session_id=${this.config.session.id} | label=${this.config.session.label} | reconnect_attempt=${this.reconnectAttempts + 1}`
+    );
+
     this.clearReconnectTimer();
 
     let socket: WebSocket;
     try {
       socket = this.createSocket();
     } catch (error) {
+      logTerminal(
+        'ERROR',
+        `terminal bridge connect failed | session_id=${this.config.session.id} | label=${this.config.session.label}`,
+        error
+      );
       this.scheduleReconnect(`failed to construct websocket (${this.formatError(error)})`);
       return;
     }
@@ -75,6 +123,7 @@ export class OpenCodeTerminalBridge implements vscode.Pseudoterminal {
     socket.binaryType = 'arraybuffer';
     socket.onopen = () => {
       this.reconnectAttempts = 0;
+      logTerminal('INFO', `terminal bridge connected | session_id=${this.config.session.id} | label=${this.config.session.label}`);
       this.printStatus(`Connected to OpenCode terminal for ${this.config.session.label}.`);
       if (this.dimensions) {
         this.sendResize(this.dimensions);
@@ -86,11 +135,24 @@ export class OpenCodeTerminalBridge implements vscode.Pseudoterminal {
       this.handleSocketMessage(event.data);
     };
 
-    socket.onerror = () => {
+    socket.onerror = (event: Event) => {
+      const details =
+        event instanceof ErrorEvent
+          ? event.error ?? (event.message ? new Error(event.message) : event)
+          : event;
+      logTerminal(
+        'ERROR',
+        `terminal bridge error | session_id=${this.config.session.id} | label=${this.config.session.label}`,
+        details
+      );
       this.printStatus('Terminal websocket error detected.');
     };
 
     socket.onclose = (event: CloseEvent) => {
+      const closeMessage =
+        `terminal bridge disconnected | session_id=${this.config.session.id} | label=${this.config.session.label} ` +
+        `| code=${event.code} | reason=${event.reason || 'none'} | was_clean=${event.wasClean}`;
+      logTerminal('WARN', closeMessage);
       if (this.closed) {
         return;
       }
@@ -161,12 +223,22 @@ export class OpenCodeTerminalBridge implements vscode.Pseudoterminal {
     const delays = [1000, 2000, 4000, 8000, 15000];
     const idx = Math.min(this.reconnectAttempts, delays.length - 1);
     const delayMs = delays[idx];
+    const nextAttempt = this.reconnectAttempts + 1;
     this.reconnectAttempts += 1;
+
+    logTerminal(
+      'INFO',
+      `terminal bridge reconnect scheduled | session_id=${this.config.session.id} | label=${this.config.session.label} | attempt=${nextAttempt} | delay_ms=${delayMs} | reason=${reason}`
+    );
 
     this.printStatus(`Terminal ${reason}; reconnecting in ${Math.floor(delayMs / 1000)}s...`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       if (!this.closed && this.openCalled) {
+        logTerminal(
+          'INFO',
+          `terminal bridge reconnecting | session_id=${this.config.session.id} | label=${this.config.session.label} | attempt=${nextAttempt}`
+        );
         this.connect();
       }
     }, delayMs);
@@ -181,8 +253,14 @@ export class OpenCodeTerminalBridge implements vscode.Pseudoterminal {
 
     if (authHeader) {
       try {
+        logTerminal('INFO', `terminal bridge ws auth mode=header | session_id=${this.config.session.id}`);
         return new WSAny(primary, undefined, { headers: authHeader });
-      } catch {
+      } catch (error) {
+        logTerminal(
+          'WARN',
+          `terminal bridge ws auth header unsupported; using query-token fallback | session_id=${this.config.session.id}`,
+          error
+        );
       }
     }
 
@@ -223,6 +301,10 @@ export class OpenCodeTerminalBridge implements vscode.Pseudoterminal {
     if (this.closed) {
       return;
     }
+    logTerminal(
+      'INFO',
+      `terminal bridge dispose | session_id=${this.config.session.id} | label=${this.config.session.label} | exit_code=${exitCode}`
+    );
     this.closed = true;
     this.clearReconnectTimer();
 

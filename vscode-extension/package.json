@@ -19,6 +19,7 @@
     "onCommand:opencode.createSession",
     "onCommand:opencode.openChat",
     "onCommand:opencode.openTerminal",
+    "onCommand:opencode.showLogs",
     "onCommand:opencode.refreshSessions",
     "onCommand:opencode.stopSession",
     "onCommand:opencode.restartSession",
@@ -67,6 +68,10 @@
         "command": "opencode.openTerminal",
         "title": "OpenCode: Open Terminal",
         "icon": "$(terminal)"
+      },
+      {
+        "command": "opencode.showLogs",
+        "title": "OpenCode: Show Logs"
       },
       {
         "command": "opencode.refreshSessions",

@@ -1,5 +1,6 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { getLogger } from '../logger';
 
 export interface DiffCommandPayload {
   sessionId?: string;
@@ -53,6 +54,7 @@ const encoder = new TextEncoder();
 
 export class DiffEditManager implements vscode.Disposable {
   private pending?: PendingDiff;
+  private readonly logger = getLogger();
   private readonly decorationType: vscode.TextEditorDecorationType;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly decorationRanges = new Map<string, vscode.Range[]>();
@@ -86,8 +88,12 @@ export class DiffEditManager implements vscode.Disposable {
   }
 
   async stageFromPayload(payload?: DiffCommandPayload): Promise<void> {
+    this.logger.info(
+      `diff stage start | sessionId=${payload?.sessionId ?? 'n/a'} | source=${payload?.source ?? 'unknown'} | rawLength=${(payload?.diff ?? '').length}`
+    );
     const raw = (payload?.diff ?? '').trim();
     if (!raw) {
+      this.logger.warn('diff stage skipped | reason=empty-payload');
       vscode.window.showWarningMessage('No diff payload was provided.');
       return;
     }
@@ -95,15 +101,21 @@ export class DiffEditManager implements vscode.Disposable {
     const unifiedDiff = this.extractUnifiedDiff(raw);
     const patches = this.parseUnifiedDiff(unifiedDiff);
     if (patches.length === 0) {
+      this.logger.warn('diff stage skipped | reason=unparseable-patches');
       vscode.window.showWarningMessage('Unable to parse diff payload into file patches.');
       return;
     }
 
     const files = await this.buildPendingFiles(patches, payload?.sessionId);
     if (files.length === 0) {
+      this.logger.warn('diff stage skipped | reason=no-applicable-files');
       vscode.window.showWarningMessage('No applicable file changes were found in the diff payload.');
       return;
     }
+
+    const createCount = files.filter((file) => file.isCreate).length;
+    const deleteCount = files.filter((file) => file.isDelete).length;
+    const modifyCount = files.length - createCount - deleteCount;
 
     this.pending = {
       sessionId: payload?.sessionId,
@@ -112,6 +124,10 @@ export class DiffEditManager implements vscode.Disposable {
       rawDiff: raw,
       files
     };
+
+    this.logger.info(
+      `diff stage ready | sessionId=${this.pending.sessionId ?? 'n/a'} | source=${this.pending.source} | files=${this.pending.files.length} | created=${createCount} | deleted=${deleteCount} | modified=${modifyCount}`
+    );
 
     await this.openPreview(this.pending.files[0], 1, this.pending.files.length);
     const selection = await vscode.window.showInformationMessage(
@@ -122,16 +138,19 @@ export class DiffEditManager implements vscode.Disposable {
     );
 
     if (selection === 'Apply') {
+      this.logger.info('diff stage selection | action=apply');
       await this.applyLastDiff();
       return;
     }
 
     if (selection === 'Reject') {
+      this.logger.info('diff stage selection | action=reject');
       this.rejectLastDiff();
       return;
     }
 
     if (selection === 'Preview All') {
+      this.logger.info('diff stage selection | action=preview-all');
       for (let index = 1; index < this.pending.files.length; index += 1) {
         await this.openPreview(this.pending.files[index], index + 1, this.pending.files.length);
       }
@@ -139,17 +158,28 @@ export class DiffEditManager implements vscode.Disposable {
     }
 
     if (selection === 'Preview') {
+      this.logger.info('diff stage selection | action=preview');
       await this.openPreview(this.pending.files[0], 1, this.pending.files.length);
+      return;
     }
+
+    this.logger.info('diff stage selection | action=dismissed');
   }
 
   async applyLastDiff(): Promise<void> {
     if (!this.pending) {
+      this.logger.warn('diff apply skipped | reason=no-pending');
       vscode.window.showWarningMessage('No staged diff available.');
       return;
     }
 
     const pending = this.pending;
+    const createCount = pending.files.filter((file) => file.isCreate).length;
+    const deleteCount = pending.files.filter((file) => file.isDelete).length;
+    const modifyCount = pending.files.length - createCount - deleteCount;
+    this.logger.info(
+      `diff apply start | sessionId=${pending.sessionId ?? 'n/a'} | source=${pending.source} | files=${pending.files.length} | created=${createCount} | deleted=${deleteCount} | modified=${modifyCount}`
+    );
     const workspaceEdit = new vscode.WorkspaceEdit();
     const createdOrModifiedForDecorations: PendingDiffFile[] = [];
 
@@ -174,6 +204,7 @@ export class DiffEditManager implements vscode.Disposable {
 
     const editApplied = await vscode.workspace.applyEdit(workspaceEdit);
     if (!editApplied) {
+      this.logger.error(`diff apply failed | reason=workspace-edit-rejected | sessionId=${pending.sessionId ?? 'n/a'} | files=${pending.files.length}`);
       vscode.window.showErrorMessage('Failed to apply staged workspace edits.');
       return;
     }
@@ -189,26 +220,43 @@ export class DiffEditManager implements vscode.Disposable {
         'Keep'
       );
       if (choice !== 'Delete') {
+        this.logger.info(`diff apply delete decision | path=${file.path} | action=kept`);
         continue;
       }
-      await vscode.workspace.fs.delete(file.uri, { useTrash: true });
+      try {
+        await vscode.workspace.fs.delete(file.uri, { useTrash: true });
+        this.logger.info(`diff apply delete decision | path=${file.path} | action=deleted`);
+      } catch (error) {
+        this.logger.error(`diff apply delete failed | path=${file.path}`, error);
+        throw error;
+      }
     }
 
     this.setDecorations(createdOrModifiedForDecorations);
     this.clearPending(false);
+    this.logger.info(
+      `diff apply complete | sessionId=${pending.sessionId ?? 'n/a'} | files=${pending.files.length} | highlighted=${createdOrModifiedForDecorations.length}`
+    );
     vscode.window.showInformationMessage('OpenCode diff applied.');
   }
 
   rejectLastDiff(): void {
     if (!this.pending) {
+      this.logger.warn('diff reject skipped | reason=no-pending');
       vscode.window.showWarningMessage('No staged diff available.');
       return;
     }
+    this.logger.info(
+      `diff reject start | sessionId=${this.pending.sessionId ?? 'n/a'} | source=${this.pending.source} | files=${this.pending.files.length}`
+    );
     this.clearPending(true);
+    this.logger.info('diff reject complete');
     vscode.window.showInformationMessage('OpenCode staged diff discarded.');
   }
 
   clearDecorations(): void {
+    const fileCount = this.decorationRanges.size;
+    this.logger.info(`diff clear start | files=${fileCount}`);
     this.decorationRanges.clear();
     if (this.clearTimer) {
       clearTimeout(this.clearTimer);
@@ -217,6 +265,7 @@ export class DiffEditManager implements vscode.Disposable {
     for (const editor of vscode.window.visibleTextEditors) {
       editor.setDecorations(this.decorationType, []);
     }
+    this.logger.info('diff clear complete');
   }
 
   private clearPending(clearDecorations: boolean): void {

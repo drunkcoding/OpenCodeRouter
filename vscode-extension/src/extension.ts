@@ -1,7 +1,52 @@
 import * as vscode from 'vscode';
 import { ChatSessionTarget, ChatWebviewProvider } from './chat/ChatWebviewProvider';
+import { LatestBlockClient, LatestBlockSnapshot } from './chat/latestBlock';
 import { DiffEditManager } from './edits/DiffEditManager';
 import { OpenCodeTerminalBridge } from './terminal/OpenCodeTerminalBridge';
+
+type LogLevel = 'INFO' | 'WARN' | 'ERROR';
+
+class ExtensionLogger {
+  constructor(private readonly channel: vscode.OutputChannel) {}
+
+  info(message: string): void {
+    this.log('INFO', message);
+  }
+
+  warn(message: string): void {
+    this.log('WARN', message);
+  }
+
+  error(message: string, error?: unknown): void {
+    const details = formatErrorDetails(error);
+    this.log('ERROR', details ? `${message} | ${details}` : message);
+  }
+
+  show(preserveFocus = false): void {
+    this.channel.show(preserveFocus);
+  }
+
+  logFetch(method: string, url: string, status: number | undefined, durationMs: number, error?: unknown): void {
+    const base = `${method.toUpperCase()} ${url} | status=${status ?? 'n/a'} | duration=${durationMs}ms`;
+    if (error) {
+      this.error(`fetch failed | ${base}`, error);
+      return;
+    }
+
+    if (typeof status === 'number' && status >= 400) {
+      this.warn(`fetch response | ${base}`);
+      return;
+    }
+
+    this.info(`fetch response | ${base}`);
+  }
+
+  private log(level: LogLevel, message: string): void {
+    this.channel.appendLine(`[${new Date().toISOString()}] [${level}] ${message}`);
+  }
+}
+
+let loggerInstance: ExtensionLogger | undefined;
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
 
@@ -11,6 +56,9 @@ interface SessionRecord {
   status: string;
   workspacePath: string;
   stale?: boolean;
+  latestBlockPreview?: string;
+  latestBlockError?: string;
+  latestBlockLoading?: boolean;
 }
 
 class SessionItem extends vscode.TreeItem {
@@ -22,14 +70,33 @@ class SessionItem extends vscode.TreeItem {
     this.description = session.stale
       ? `${session.workspacePath || 'n/a'} · stale data`
       : session.workspacePath || undefined;
-    this.tooltip = session.stale
-      ? `${session.label}\nStatus: ${session.status}\nWorkspace: ${session.workspacePath || 'n/a'}\nData: stale (control plane unavailable)`
-      : `${session.label}\nStatus: ${session.status}\nWorkspace: ${session.workspacePath || 'n/a'}`;
+    this.tooltip = this.buildTooltip(session);
     this.command = {
       command: 'opencode.attachSession',
       title: 'Attach Session',
       arguments: [this]
     };
+  }
+
+  private buildTooltip(session: SessionRecord): string {
+    const latest = session.latestBlockLoading
+      ? 'Loading latest conversation…'
+      : session.latestBlockError
+        ? `Unavailable: ${session.latestBlockError}`
+        : session.latestBlockPreview
+          ? session.latestBlockPreview
+          : 'No conversation block available';
+
+    const lines = [
+      session.label,
+      `Status: ${session.status}`,
+      `Workspace: ${session.workspacePath || 'n/a'}`,
+      ...(session.stale ? ['Data: stale (control plane unavailable)'] : []),
+      'Latest Conversation:',
+      latest
+    ];
+
+    return lines.join('\n');
   }
 
   private statusToIcon(status: string): vscode.ThemeIcon {
@@ -60,6 +127,7 @@ class SessionTreeProvider implements vscode.TreeDataProvider<SessionItem>, vscod
   private reconnectDelayMs = 2000;
   private scheduledRefresh?: NodeJS.Timeout;
   private staleNoticeVisible = false;
+  private readonly latestBlockClient = new LatestBlockClient((path, init) => this.request(path, init));
 
   constructor(
     private readonly onConnectionStateChanged: (state: ConnectionState, detail?: string) => void
@@ -80,6 +148,9 @@ class SessionTreeProvider implements vscode.TreeDataProvider<SessionItem>, vscod
   }
 
   getChildren(): Thenable<SessionItem[]> {
+    for (const session of this.sessions) {
+      this.ensureLatestBlockPreview(session.id);
+    }
     return Promise.resolve(this.sessions.map((session) => new SessionItem(session)));
   }
 
@@ -104,12 +175,29 @@ class SessionTreeProvider implements vscode.TreeDataProvider<SessionItem>, vscod
       }
 
       const body = (await response.json()) as unknown;
+      const previousById = new Map(this.sessions.map((session) => [session.id, session]));
+
       this.sessions = Array.isArray(body)
         ? body
             .map((entry) => this.normalizeSession(entry))
             .filter((value): value is SessionRecord => value !== null)
-            .map((session) => ({ ...session, stale: false }))
+            .map((session) => {
+              const previous = previousById.get(session.id);
+              const cached = this.latestBlockClient.getCached(session.id);
+              return {
+                ...session,
+                stale: false,
+                latestBlockPreview: cached?.block ?? previous?.latestBlockPreview,
+                latestBlockError: cached?.error || previous?.latestBlockError,
+                latestBlockLoading: this.latestBlockClient.isInFlight(session.id)
+              };
+            })
         : [];
+
+      this.latestBlockClient.prune(this.sessions.map((session) => session.id));
+      for (const session of this.sessions) {
+        this.ensureLatestBlockPreview(session.id);
+      }
 
       this.staleNoticeVisible = false;
       if (this.connectionState !== 'connected') {
@@ -119,7 +207,7 @@ class SessionTreeProvider implements vscode.TreeDataProvider<SessionItem>, vscod
     } catch (error) {
       const detail = this.formatError(error);
       if (this.sessions.length > 0) {
-        this.sessions = this.sessions.map((session) => ({ ...session, stale: true }));
+        this.sessions = this.sessions.map((session) => ({ ...session, stale: true, latestBlockLoading: false }));
         this.setConnectionState('error', `Showing stale data: ${detail}`);
         this.changeEmitter.fire();
         this.showStaleDataWarning(detail);
@@ -272,6 +360,59 @@ class SessionTreeProvider implements vscode.TreeDataProvider<SessionItem>, vscod
       throw new Error(`${method} /api/sessions/{id}/${action} failed (${response.status})`);
     }
     await this.refresh();
+  }
+
+  private ensureLatestBlockPreview(sessionId: string): void {
+    const session = this.sessions.find((entry) => entry.id === sessionId);
+    if (!session || session.stale) {
+      return;
+    }
+
+    const cached = this.latestBlockClient.getCached(sessionId);
+    if (cached) {
+      this.applyLatestBlockSnapshot(sessionId, cached);
+      return;
+    }
+
+    if (this.latestBlockClient.isInFlight(sessionId)) {
+      if (!session.latestBlockLoading) {
+        session.latestBlockLoading = true;
+        this.changeEmitter.fire();
+      }
+      return;
+    }
+
+    if (!session.latestBlockLoading) {
+      session.latestBlockLoading = true;
+      this.changeEmitter.fire();
+    }
+
+    void this.latestBlockClient.getOrFetch(sessionId).then((snapshot) => {
+      this.applyLatestBlockSnapshot(sessionId, snapshot);
+    });
+  }
+
+  private applyLatestBlockSnapshot(sessionId: string, snapshot: LatestBlockSnapshot): void {
+    const session = this.sessions.find((entry) => entry.id === sessionId);
+    if (!session) {
+      return;
+    }
+
+    const nextPreview = snapshot.block || undefined;
+    const nextError = snapshot.error || undefined;
+    const shouldUpdate =
+      session.latestBlockPreview !== nextPreview ||
+      session.latestBlockError !== nextError ||
+      session.latestBlockLoading !== false;
+
+    if (!shouldUpdate) {
+      return;
+    }
+
+    session.latestBlockPreview = nextPreview;
+    session.latestBlockError = nextError;
+    session.latestBlockLoading = false;
+    this.changeEmitter.fire();
   }
 
   private normalizeSession(value: unknown): SessionRecord | null {
@@ -454,6 +595,15 @@ class ConnectionStatusBar implements vscode.Disposable {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  const logger = initLogger(context);
+  const configuredControlPlaneUrl = getControlPlaneUrlFromConfig();
+  const configuredAuthToken = getAuthTokenFromConfig();
+  logger.info(
+    `extension activation | controlPlaneUrl=${configuredControlPlaneUrl} | authToken=${configuredAuthToken ? 'set' : 'none'}`
+  );
+
+  void runHealthPreflightCheck(configuredControlPlaneUrl, configuredAuthToken, logger);
+
   const statusBar = new ConnectionStatusBar();
   const treeProvider = new SessionTreeProvider((state, detail) => statusBar.update(state, detail));
   const chatProvider = new ChatWebviewProvider(context.extensionUri);
@@ -470,10 +620,17 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
+    vscode.commands.registerCommand('opencode.showLogs', () => {
+      logger.show();
+    })
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand('opencode.refreshSessions', async () => {
       try {
         await treeProvider.refresh();
       } catch (error) {
+        logger.error('refresh sessions command failed', error);
         vscode.window.showErrorMessage(`Failed to refresh sessions: ${error instanceof Error ? error.message : String(error)}`);
       }
     })
@@ -501,6 +658,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await treeProvider.createSession(workspacePath, label?.trim() || undefined);
         vscode.window.showInformationMessage('OpenCode session created.');
       } catch (error) {
+        logger.error('create session command failed', error);
         vscode.window.showErrorMessage(
           `Failed to create session: ${error instanceof Error ? error.message : String(error)}`
         );
@@ -597,6 +755,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await treeProvider.attachSession(item);
         vscode.window.showInformationMessage(`Attached to session: ${item.session.label}`);
       } catch (error) {
+        logger.error('attach session command failed', error);
         vscode.window.showErrorMessage(
           `Failed to attach session: ${error instanceof Error ? error.message : String(error)}`
         );
@@ -614,6 +773,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await treeProvider.stopSession(item);
         vscode.window.showInformationMessage(`Stopped session: ${item.session.label}`);
       } catch (error) {
+        logger.error('stop session command failed', error);
         vscode.window.showErrorMessage(`Failed to stop session: ${error instanceof Error ? error.message : String(error)}`);
       }
     })
@@ -629,6 +789,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await treeProvider.restartSession(item);
         vscode.window.showInformationMessage(`Restarted session: ${item.session.label}`);
       } catch (error) {
+        logger.error('restart session command failed', error);
         vscode.window.showErrorMessage(
           `Failed to restart session: ${error instanceof Error ? error.message : String(error)}`
         );
@@ -656,6 +817,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await treeProvider.deleteSession(item);
         vscode.window.showInformationMessage(`Deleted session: ${item.session.label}`);
       } catch (error) {
+        logger.error('delete session command failed', error);
         vscode.window.showErrorMessage(
           `Failed to delete session: ${error instanceof Error ? error.message : String(error)}`
         );
@@ -717,4 +879,78 @@ function getControlPlaneUrlFromConfig(): string {
 
 function getAuthTokenFromConfig(): string {
   return vscode.workspace.getConfiguration('opencode').get<string>('authToken', '').trim();
+}
+
+function initLogger(context: vscode.ExtensionContext): ExtensionLogger {
+  if (loggerInstance) {
+    return loggerInstance;
+  }
+
+  const channel = vscode.window.createOutputChannel('OpenCode Control Plane');
+  context.subscriptions.push(channel);
+  loggerInstance = new ExtensionLogger(channel);
+  return loggerInstance;
+}
+
+async function runHealthPreflightCheck(controlPlaneUrl: string, authToken: string, logger: ExtensionLogger): Promise<void> {
+  const healthUrl = `${controlPlaneUrl}/api/health`;
+  const headers = new Headers({ Accept: 'application/json' });
+  if (authToken) {
+    headers.set('Authorization', `Bearer ${authToken}`);
+  }
+
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeoutHandle = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, 3000);
+
+  const startedAt = Date.now();
+  logger.info(`health preflight start | GET ${healthUrl}`);
+  try {
+    const response = await fetch(healthUrl, {
+      method: 'GET',
+      headers,
+      signal: controller.signal
+    });
+
+    const durationMs = Date.now() - startedAt;
+    logger.logFetch('GET', healthUrl, response.status, durationMs);
+    logger.info(`health preflight reachable | url=${healthUrl} | status=${response.status} | durationMs=${durationMs}`);
+  } catch (error) {
+    const durationMs = Date.now() - startedAt;
+    logger.logFetch('GET', healthUrl, undefined, durationMs, error);
+    const reason = timedOut
+      ? 'timeout after 3000ms'
+      : error instanceof Error
+        ? error.message
+        : String(error);
+    logger.warn(`health preflight unreachable | url=${healthUrl} | reason=${reason}`);
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
+function formatErrorDetails(error: unknown): string {
+  if (!error) {
+    return '';
+  }
+
+  if (error instanceof Error) {
+    if (error.stack && error.stack.trim()) {
+      return error.stack;
+    }
+    return error.message;
+  }
+
+  if (typeof error === 'string') {
+    return error;
+  }
+
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
 }

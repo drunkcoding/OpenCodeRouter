@@ -1,6 +1,7 @@
 import { randomBytes } from 'crypto';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { getLogger } from '../logger';
 
 export interface ChatSessionTarget {
   id: string;
@@ -34,6 +35,7 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider, vscode.D
   private view?: vscode.WebviewView;
   private currentSession: ChatSessionTarget | null = null;
   private streamAbort?: AbortController;
+  private readonly logger = getLogger();
 
   constructor(private readonly extensionUri: vscode.Uri) {}
 
@@ -42,6 +44,9 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider, vscode.D
   }
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
+    this.logger.info(
+      `chat view resolve | hasExistingView=${Boolean(this.view)} | hasSession=${Boolean(this.currentSession)}${this.currentSession ? ` | sessionId=${this.currentSession.id}` : ''}`
+    );
     this.view = webviewView;
     webviewView.webview.options = {
       enableScripts: true,
@@ -54,6 +59,9 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider, vscode.D
     });
 
     webviewView.onDidDispose(() => {
+      this.logger.info(
+        `chat view disposed | hadActiveStream=${Boolean(this.streamAbort)} | hadSession=${Boolean(this.currentSession)}${this.currentSession ? ` | sessionId=${this.currentSession.id}` : ''}`
+      );
       this.streamAbort?.abort();
       this.streamAbort = undefined;
       this.view = undefined;
@@ -63,12 +71,16 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider, vscode.D
   }
 
   async openChat(session?: ChatSessionTarget): Promise<void> {
+    this.logger.info(`chat open requested | hasProvidedSession=${Boolean(session)}${session ? ` | targetSessionId=${session.id}` : ''}`);
     if (session) {
       this.currentSession = session;
     }
 
     await vscode.commands.executeCommand('workbench.view.extension.opencode');
     this.view?.show?.(true);
+    this.logger.info(
+      `chat view shown | hasView=${Boolean(this.view)} | hasSession=${Boolean(this.currentSession)}${this.currentSession ? ` | sessionId=${this.currentSession.id}` : ''}`
+    );
     this.post({ type: 'session', session: this.currentSession });
     if (this.currentSession) {
       await this.loadHistory();
@@ -76,6 +88,7 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider, vscode.D
   }
 
   private async handleMessage(msg: InboundMessage): Promise<void> {
+    this.logger.info(`chat message received | type=${msg.type} | hasSession=${Boolean(this.currentSession)}`);
     switch (msg.type) {
       case 'ready':
         this.post({ type: 'session', session: this.currentSession });
@@ -124,6 +137,10 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider, vscode.D
 
       this.post({ type: 'chatHistory', messages });
     } catch (error) {
+      this.logger.error(
+        `load history failed | hasSession=${Boolean(this.currentSession)}${this.currentSession ? ` | sessionId=${this.currentSession.id}` : ''}`,
+        error
+      );
       this.post({ type: 'error', message: `Failed to load chat history: ${this.formatError(error)}` });
     }
   }
@@ -182,7 +199,16 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider, vscode.D
       }
     } catch (error) {
       const aborted = error instanceof Error && error.name === 'AbortError';
+      if (aborted) {
+        this.logger.info(
+          `chat stream aborted | hasSession=${Boolean(this.currentSession)}${this.currentSession ? ` | sessionId=${this.currentSession.id}` : ''}`
+        );
+      }
       if (!aborted) {
+        this.logger.error(
+          `chat stream failed | hasSession=${Boolean(this.currentSession)}${this.currentSession ? ` | sessionId=${this.currentSession.id}` : ''}`,
+          error
+        );
         this.post({ type: 'error', message: `Chat streaming failed: ${this.formatError(error)}` });
       }
     } finally {
@@ -329,6 +355,7 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider, vscode.D
       editor.selection = new vscode.Selection(position, position);
       editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
     } catch (error) {
+      this.logger.error(`open file from chat failed | path=${trimmed} | line=${typeof line === 'number' ? line : 'n/a'}`, error);
       vscode.window.showErrorMessage(`Unable to open file reference ${trimmed}: ${this.formatError(error)}`);
     }
   }
@@ -338,6 +365,9 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider, vscode.D
     if (!content) {
       return;
     }
+    this.logger.info(
+      `apply diff requested from chat | hasSession=${Boolean(this.currentSession)}${this.currentSession ? ` | sessionId=${this.currentSession.id}` : ''}`
+    );
     await vscode.commands.executeCommand('opencode.applyDiffPreview', {
       sessionId: this.currentSession?.id,
       diff: content
@@ -358,10 +388,22 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider, vscode.D
       headers.set('Authorization', `Bearer ${token}`);
     }
 
-    return fetch(`${this.getControlPlaneUrl()}${pathname}`, {
-      ...init,
-      headers
-    });
+    const method = (init.method ?? 'GET').toUpperCase();
+    const url = `${this.getControlPlaneUrl()}${pathname}`;
+    const startedAt = Date.now();
+    this.logger.info(`chat request start | method=${method} | url=${url}`);
+
+    try {
+      const response = await fetch(url, {
+        ...init,
+        headers
+      });
+      this.logger.logFetch(method, url, response.status, Date.now() - startedAt);
+      return response;
+    } catch (error) {
+      this.logger.logFetch(method, url, undefined, Date.now() - startedAt, error);
+      throw error;
+    }
   }
 
   private getControlPlaneUrl(): string {
